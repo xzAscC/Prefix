@@ -8,7 +8,14 @@ authors = [
     { name = "Xudong Zhu", email = "xzascc3944@gmail.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "numpy>=2.0",
+    "torch>=2.6",
+    "transformers>=4.51",
+    "datasets>=3.2",
+    "matplotlib>=3.10",
+    "pyyaml>=6.0",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]
