@@ -33,32 +33,19 @@ from contextlib import contextmanager
 from email.message import EmailMessage
 from pathlib import Path
 
+from . import env
+
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_TIMEOUT = 30
 
 
 def _dotenv_path() -> Path:
-    return Path(__file__).resolve().parents[2] / ".env"
+    return env.dotenv_path()
 
 
 def _load_dotenv(path: Path | None = None) -> dict[str, str]:
-    """Parse a ``KEY=VALUE`` file; ignores comments, blanks, quoted values."""
-    path = path if path is not None else _dotenv_path()
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return values
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip("'\"")
-        if key:
-            values[key] = value
-    return values
+    return env.load_dotenv(path if path is not None else _dotenv_path())
 
 
 def _ensure_env() -> None:

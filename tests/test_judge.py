@@ -183,5 +183,7 @@ def test_project_without_argument_or_environment_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    # isolate from the developer's real .env (see AGENTS.md rule 10)
+    monkeypatch.setattr(judge_module, "ensure_env", lambda: None)
     with pytest.raises(RuntimeError, match="GOOGLE_CLOUD_PROJECT"):
         GeminiJudge(token_provider=lambda: "token", transport=FakeTransport([]))
