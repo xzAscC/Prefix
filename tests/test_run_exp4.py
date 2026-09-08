@@ -83,6 +83,106 @@ def test_judge_completeness_gate(tmp_path: Path) -> None:
         )
 
 
+def test_judge_resume_uses_composite_ids_and_expected_ids(tmp_path: Path) -> None:
+    generation = tmp_path / "gen.jsonl"
+    output = tmp_path / "judge.jsonl"
+    exp4.append_jsonl(generation, [{"id": "0", "text": "a"}, {"id": "1", "text": "b"}])
+    exp4.append_jsonl(output, [{"id": "pos_full/0"}])
+    calls: list[str] = []
+    kwargs = {
+        "output_id": lambda row: f"pos_full/{row['id']}",
+        "expected_ids": ["pos_full/0", "pos_full/1"],
+    }
+    exp4.judge_jsonl(
+        generation,
+        output,
+        ["0", "1"],
+        lambda row: calls.append(row["id"]) or {"answer_correct": True},
+        **kwargs,
+    )
+    assert calls == ["1"]
+    exp4.judge_jsonl(
+        generation,
+        output,
+        ["0", "1"],
+        lambda row: pytest.fail("duplicate judge call"),
+        **kwargs,
+    )
+
+    incomplete = tmp_path / "incomplete-generation.jsonl"
+    exp4.append_jsonl(incomplete, [{"id": "0", "text": "a"}])
+    with pytest.raises(RuntimeError, match="missing"):
+        exp4.judge_jsonl(
+            incomplete,
+            incomplete,
+            ["0", "1"],
+            lambda row: {"answer_correct": True},
+            **kwargs,
+        )
+
+
+def test_judge_empty_generation_fails(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="empty"):
+        exp4.judge_jsonl(
+            tmp_path / "empty.jsonl", tmp_path / "judge.jsonl", [], lambda row: {}
+        )
+
+
+def test_unparseable_judge_row_keeps_condition_metadata(tmp_path: Path) -> None:
+    generation = tmp_path / "gen.jsonl"
+    output = tmp_path / "judge.jsonl"
+    exp4.append_jsonl(generation, [{"id": "0", "text": "x"}])
+    exp4.judge_jsonl(
+        generation,
+        output,
+        ["0"],
+        lambda row: (_ for _ in ()).throw(RuntimeError("bad response")),
+        output_id=lambda row: "pos_full/0",
+        unparseable_result=lambda row: {
+            "condition": "pos_full",
+            "format_boxed": None,
+            "format_answer_is": None,
+            "answer_correct": None,
+        },
+    )
+    assert exp4.read_jsonl(output) == [
+        {
+            "id": "pos_full/0",
+            "condition": "pos_full",
+            "format_boxed": None,
+            "format_answer_is": None,
+            "answer_correct": None,
+            "blocked": False,
+            "unparseable": True,
+        }
+    ]
+
+
+def test_judge_appends_chunks_of_at_most_64(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = tmp_path / "gen.jsonl"
+    rows = [{"id": str(index), "text": "x"} for index in range(130)]
+    exp4.append_jsonl(generation, rows)
+    appended: list[int] = []
+    real_append = exp4.append_jsonl
+
+    def record_append(path: Path, records: list[dict[str, object]]) -> None:
+        appended.append(len(records))
+        real_append(path, records)
+
+    monkeypatch.setattr(exp4, "append_jsonl", record_append)
+    exp4.judge_jsonl(
+        generation,
+        tmp_path / "judge.jsonl",
+        [str(index) for index in range(130)],
+        lambda row: {"answer_correct": True},
+        output_id=lambda row: f"baseline/{row['id']}",
+        expected_ids=[f"baseline/{index}" for index in range(130)],
+    )
+    assert appended == [64, 64, 2]
+
+
 def test_judge_phase_passes_math_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +273,7 @@ def test_blocked_math_item_isolated_and_excluded_from_scores(
         "format_answer_is": None,
         "answer_correct": None,
         "blocked": True,
+        "unparseable": False,
     }
     assert rows[1]["answer_correct"] is True and rows[1]["blocked"] is False
 
@@ -200,6 +301,14 @@ def test_blocked_math_item_isolated_and_excluded_from_scores(
                 "blocked": False,
             },
             {
+                "condition": "pos_full_l20_a0.1",
+                "format_boxed": None,
+                "format_answer_is": None,
+                "answer_correct": None,
+                "blocked": False,
+                "unparseable": True,
+            },
+            {
                 "condition": "neg_full_l20_a0.1",
                 "format_boxed": None,
                 "format_answer_is": None,
@@ -221,6 +330,7 @@ def test_blocked_math_item_isolated_and_excluded_from_scores(
         "steer_success": 1.0,
         "a_math": 1.0,
         "blocked": 1,
+        "unparseable": 1,
     }
     exp4.append_jsonl(
         tmp_path / "checkpoints" / "exp4_test_judge.jsonl",
@@ -252,7 +362,29 @@ def test_blocked_math_item_isolated_and_excluded_from_scores(
     monkeypatch.setattr(exp4, "make_pdf", lambda *args: None)
     exp4.analyze_results(cfg, tmp_path, None)
     results = exp4.read_json(tmp_path / "checkpoints" / "exp4_results.json")
-    assert results["pos/full"] == {"steer_success": 1.0, "a_math": 1.0, "blocked": 1}
+    assert results["pos/full"] == {
+        "steer_success": 1.0,
+        "a_math": 1.0,
+        "blocked": 1,
+        "unparseable": 0,
+    }
+    assert results["baseline"]["steer_success"] is None
+
+
+def test_direction_phase_resumes_verified_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directions = tmp_path / "checkpoints" / "exp4_directions.json"
+    directions.parent.mkdir()
+    directions.write_text("{}")
+    monkeypatch.setattr(exp4, "verify_manifest", lambda *args: None)
+    monkeypatch.setattr(
+        exp4, "get_engine", lambda *args, **kwargs: pytest.fail("generated")
+    )
+
+    exp4.direction_phase({}, tmp_path, 2)
+
+    assert "resume" in capsys.readouterr().out
 
 
 def test_all_orders_selection_before_test_generation(

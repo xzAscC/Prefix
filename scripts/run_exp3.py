@@ -144,33 +144,60 @@ def judge_jsonl(
     judge: Callable[[dict[str, Any]], Any],
     output_id: Callable[[dict[str, Any]], str] | None = None,
     blocked_result: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    *,
+    expected_ids: list[str] | None = None,
+    require_output_complete: bool = True,
 ) -> None:
+    if expected_ids is None:
+        expected_ids = expected
     require_complete(generation, expected, label=str(generation))
     done = completed_ids(output)
     rows = read_jsonl(generation)
-    pending = [row for row in rows if str(row["id"]) not in done]
+    if not rows:
+        raise RuntimeError(f"{generation}: empty generation")
+    prepared = [(row, output_id(row) if output_id else str(row["id"])) for row in rows]
+    pending = [(row, row_id) for row, row_id in prepared if row_id not in done]
 
     def judge_item(row: dict[str, Any]) -> dict[str, Any]:
+        condition = row.get("condition")
+        if condition is None and output_id is not None:
+            condition = output_id(row).split("/", 1)[0]
         try:
             result = judge(row)
         except JudgeBlocked:
-            result = blocked_result(row) if blocked_result else {}
+            result: dict[str, Any] = blocked_result(row) if blocked_result else {}
+            result.setdefault("condition", condition or "unknown")
+            result.setdefault("id", str(row["id"]))
+            result.setdefault("safe", None)
             result["blocked"] = True
             return result
         except RuntimeError:
-            return {"safe": None, "blocked": False}
-        result = result if isinstance(result, dict) else {"safe": bool(result)}
+            return {
+                "condition": condition or "unknown",
+                "id": str(row["id"]),
+                "safe": None,
+                "blocked": False,
+                "unparseable": True,
+            }
+        result = cast(
+            dict[str, Any],
+            result if isinstance(result, dict) else {"safe": bool(result)},
+        )
+        result.setdefault("condition", condition or "unknown")
+        result.setdefault("id", str(row["id"]))
+        result.setdefault("safe", None)
         result["blocked"] = False
         return result
 
-    results = judge_batch(judge_item, pending, max_workers=8)
-    append_jsonl(
-        output,
-        [
-            {"id": output_id(row) if output_id else str(row["id"]), **result}
-            for row, result in zip(pending, results)
-        ],
-    )
+    for start in range(0, len(pending), 64):
+        chunk = pending[start : start + 64]
+        results = judge_batch(judge_item, [row for row, _ in chunk], max_workers=8)
+        append_jsonl(
+            output,
+            [{**result, "id": row_id} for (_, row_id), result in zip(chunk, results)],
+        )
+    if require_output_complete:
+        require_complete(output, expected_ids, label=str(output))
 
 
 def logprob_pass(
@@ -378,6 +405,11 @@ def make_pdf(path: Path, values: dict[str, Any]) -> None:
 def direction_phase(
     cfg: dict[str, Any], work: Path, batch_prompts: int, limit: int | None = None
 ) -> None:
+    direction_path = _paths(work, "exp3_directions.json")
+    if direction_path.exists():
+        verify_manifest(_paths(work, "exp3_manifest.json"), cfg)
+        print("direction: checkpoint exists; resuming", flush=True)
+        return
     llm: Any = get_engine(
         cfg["model"]["id"],
         max_model_len=cfg["model"]["max_model_len"],
@@ -425,6 +457,11 @@ def _run(argv: list[str] | None = None) -> None:
             judge_validation_phase(cfg, work, args.limit)
             analyze_selection(cfg, work, args.limit)
             generate_test_phase(cfg, work, args.limit, args.batch_prompts)
+            if (
+                cfg.get("logprob_eval", {}).get("enable", False)
+                and read_json(_paths(work, "exp3_selection.json")) is not None
+            ):
+                logprob_test_phase(cfg, work, args.limit, args.batch_prompts)
             judge_test_phase(cfg, work, args.limit)
             analyze_results(cfg, work, args.limit)
             return
@@ -446,6 +483,56 @@ def generate_phase(
         print("generate: selection is missing; skipping test generation", flush=True)
         return
     generate_test_phase(cfg, work, limit, batch_prompts)
+    if (
+        cfg.get("logprob_eval", {}).get("enable", False)
+        and read_json(_paths(work, "exp3_selection.json")) is not None
+    ):
+        logprob_test_phase(cfg, work, limit, batch_prompts)
+
+
+def logprob_test_phase(
+    cfg: dict[str, Any], work: Path, limit: int | None, batch_prompts: int
+) -> None:
+    selection = require_selection(_paths(work, "exp3_selection.json"))
+    llm: Any = get_engine(
+        cfg["model"]["id"],
+        max_model_len=cfg["model"]["max_model_len"],
+        gpu_memory_utilization=float(cfg["model"].get("gpu_memory_utilization", 0.9)),
+    )
+    tokenizer = llm.get_tokenizer()
+    records = load_mmlu_pro("test")
+    if limit is not None:
+        records = records[:limit]
+    prompts = [
+        chat_prompt(
+            tokenizer,
+            mmlu_prompt(str(row["question"]), cast(list[str], row["options"])),
+            bool(cfg.get("logprob_eval", {}).get("enable_thinking", False)),
+        )
+        for row in records
+    ]
+    directions = load_directions(_paths(work, "exp3_directions.json"))
+    for name in ["baseline", *selection]:
+        spec = None
+        if name != "baseline":
+            selected = selection[name]
+            record = directions[int(selected["layer"])]
+            spec = SteeringSpec(
+                int(selected["layer"]),
+                record.direction,
+                float(selected["alpha"]),
+                record.mean_norm,
+                schedule_for(name),
+            )
+        logprob_pass(
+            llm,
+            tokenizer,
+            prompts,
+            _paths(work, "exp3_test_logprob.jsonl"),
+            name,
+            spec,
+            batch_prompts,
+        )
 
 
 def generate_validation_phase(
@@ -568,33 +655,58 @@ def generate_test_phase(
         )
 
 
-def judge_phase(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
-    judge = GeminiJudge(model=cfg["judge"]["model"], region=cfg["judge"]["region"])
-    conditions = validation_conditions(cfg, limit)
-    for condition in ["baseline"] + [item.name for item in conditions]:
-        path = _paths(work, f"exp3_val_{condition}_hb.jsonl")
-        if path.exists():
-            rows = read_jsonl(path)
-            judge_jsonl(
-                path,
-                _paths(work, "exp3_val_judge.jsonl"),
-                [str(row["id"]) for row in rows],
-                lambda row: {
-                    "condition": condition,
-                    "i": int(row["id"]),
-                    "safe": judge.judge_safety(str(row.get("prompt", "")), row["text"]),
-                },
-                output_id=lambda row, name=condition: f"{name}/{row['id']}",
-                blocked_result=lambda row: {
-                    "condition": condition,
-                    "i": int(row["id"]),
-                    "safe": None,
-                },
-            )
+def _harmbench_ids(cfg: dict[str, Any], test: bool) -> list[int]:
+    val_ids, test_ids = harmbench_split(
+        int(cfg["validation"]["harmbench_n"]), int(cfg["seed"])
+    )
+    return test_ids if test else val_ids
+
+
+def _harmbench_behaviors() -> dict[str, str]:
+    return {
+        str(index): str(record["behavior"])
+        for index, record in enumerate(load_harmbench())
+    }
 
 
 def judge_validation_phase(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
-    judge_phase(cfg, work, limit)
+    judge = GeminiJudge(model=cfg["judge"]["model"], region=cfg["judge"]["region"])
+    conditions = validation_conditions(cfg, limit)
+    sample_ids = [str(index) for index in _harmbench_ids(cfg, False)]
+    behavior = _harmbench_behaviors()
+    expected_ids = [
+        f"{condition}/{sample_id}"
+        for condition in ["baseline"] + [item.name for item in conditions]
+        for sample_id in sample_ids
+    ]
+    for condition in ["baseline"] + [item.name for item in conditions]:
+        path = _paths(work, f"exp3_val_{condition}_hb.jsonl")
+        if path.exists():
+            judge_jsonl(
+                path,
+                _paths(work, "exp3_val_judge.jsonl"),
+                sample_ids,
+                lambda row: {
+                    "condition": condition,
+                    "id": str(row["id"]),
+                    "safe": judge.judge_safety(behavior[str(row["id"])], row["text"]),
+                },
+                output_id=lambda row, name=condition: f"{name}/{row['id']}",
+                expected_ids=expected_ids,
+                require_output_complete=False,
+                blocked_result=lambda row: {
+                    "condition": condition,
+                    "id": str(row["id"]),
+                    "safe": None,
+                },
+            )
+    if any(
+        _paths(work, f"exp3_val_{condition}_hb.jsonl").exists()
+        for condition in ["baseline"] + [item.name for item in conditions]
+    ):
+        require_complete(
+            _paths(work, "exp3_val_judge.jsonl"), expected_ids, label="validation judge"
+        )
 
 
 def judge_test_phase(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
@@ -603,26 +715,58 @@ def judge_test_phase(cfg: dict[str, Any], work: Path, limit: int | None) -> None
     conditions = (
         ["baseline"] + list(selection) if isinstance(selection, dict) else ["baseline"]
     )
+    sample_ids = [str(index) for index in _harmbench_ids(cfg, True)]
+    behavior = _harmbench_behaviors()
+    expected_ids = [
+        f"{condition}/{sample_id}"
+        for condition in conditions
+        for sample_id in sample_ids
+    ]
     for condition in conditions:
         path = _paths(work, f"exp3_test_{condition}_hb.jsonl")
         if not path.exists():
             print(f"judge: skipping missing {path}", flush=True)
             continue
-        rows = read_jsonl(path)
         judge_jsonl(
             path,
             _paths(work, "exp3_test_judge.jsonl"),
-            [str(row["id"]) for row in rows],
+            sample_ids,
             lambda row, name=condition: {
                 "condition": name,
-                "safe": judge.judge_safety("", row["text"]),
+                "id": str(row["id"]),
+                "safe": judge.judge_safety(behavior[str(row["id"])], row["text"]),
             },
             output_id=lambda row, name=condition: f"{name}/{row['id']}",
+            expected_ids=expected_ids,
+            require_output_complete=False,
             blocked_result=lambda row, name=condition: {
                 "condition": name,
+                "id": str(row["id"]),
                 "safe": None,
             },
         )
+    if any(
+        _paths(work, f"exp3_test_{condition}_hb.jsonl").exists()
+        for condition in conditions
+    ):
+        require_complete(
+            _paths(work, "exp3_test_judge.jsonl"), expected_ids, label="test judge"
+        )
+
+
+def judge_phase(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
+    judge_validation_phase(cfg, work, limit)
+    selection = read_json(_paths(work, "exp3_selection.json"), {})
+    conditions = (
+        ["baseline"] + list(selection) if isinstance(selection, dict) else ["baseline"]
+    )
+    if any(
+        _paths(work, f"exp3_test_{condition}_hb.jsonl").exists()
+        for condition in conditions
+    ):
+        judge_test_phase(cfg, work, limit)
+    else:
+        print("judge: no test generation files; skipping test judge", flush=True)
 
 
 def analyze_selection(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
