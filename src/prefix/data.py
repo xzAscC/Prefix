@@ -11,11 +11,19 @@ from typing import cast
 from urllib.request import urlopen
 
 HARMBENCH_URL = (
-    "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/"
+    "https://raw.githubusercontent.com/centerforaisafety/HarmBench/"
+    "8e1604d1171fe8a48d8febecd22f600e462bdcdd/"
     "data/behavior_datasets/harmbench_behaviors_text_all.csv"
 )
 _MMLU_PRO_DATASET = "TIGER-Lab/MMLU-Pro"
 _MATH500_DATASET = "HuggingFaceH4/MATH-500"
+_MMLU_PRO_REVISION = "b189ec765aa7ed75c8acfea42df31fdae71f97be"
+_MATH500_REVISION = "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+_LLM_LAT_REVISIONS = {
+    "LLM-LAT/benign-dataset": "799694027732ac7b5633639690a2ea8ed8597f3e",
+    "LLM-LAT/harmful-dataset": "8bfba31bc6d93a5b71808fee5275ef4b6330ed91",
+}
+MMLU_PRO_TEST_SIZE = 12032
 _ANSWER_LETTERS = "ABCDEFGHIJ"
 
 
@@ -83,13 +91,46 @@ def _dataset_loader() -> Callable[..., Iterable[Mapping[str, object]]]:
     return load_dataset
 
 
+def load_llm_lat(
+    dataset: str,
+    n: int,
+    cache_dir: Path | None = None,
+    loader: Callable[..., Iterable[Mapping[str, object]]] | None = None,
+) -> list[str]:
+    if dataset not in _LLM_LAT_REVISIONS:
+        raise ValueError(f"unsupported LLM-LAT dataset: {dataset}")
+    if n < 0:
+        raise ValueError("n must be non-negative")
+    rows = (loader or _dataset_loader())(
+        dataset,
+        split="train",
+        cache_dir=cache_dir,
+        revision=_LLM_LAT_REVISIONS[dataset],
+    )
+    records: list[str] = []
+    for row in rows:
+        try:
+            value = _field_or(row, "prompt", "text")
+        except KeyError:
+            value = _field(row, "behavior")
+        records.append(str(value))
+        if len(records) == n:
+            break
+    if len(records) < n:
+        raise ValueError(f"LLM-LAT dataset has fewer than {n} available rows")
+    return records
+
+
 def load_mmlu_pro(
     split: str,
     cache_dir: Path | None = None,
     loader: Callable[..., Iterable[Mapping[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
     rows = (loader or _dataset_loader())(
-        _MMLU_PRO_DATASET, split=split, cache_dir=cache_dir
+        _MMLU_PRO_DATASET,
+        split=split,
+        cache_dir=cache_dir,
+        revision=_MMLU_PRO_REVISION,
     )
     records: list[dict[str, object]] = []
     for row in rows:
@@ -110,7 +151,12 @@ def load_mmlu_pro(
 def mmlu_exp2_subset(
     n: int = 500, seed: int = 42, n_total: int | None = None
 ) -> list[int]:
-    total = 500 if n_total is None else n_total
+    """Return a seeded sorted sample from the MMLU-Pro test split.
+
+    Callers may pass ``len(records)`` for the actually loaded test split via
+    ``n_total`` when it differs from the official split size.
+    """
+    total = MMLU_PRO_TEST_SIZE if n_total is None else n_total
     if not 0 <= n <= total:
         raise ValueError("n must be between 0 and n_total")
     return sorted(random.Random(seed).sample(range(total), n))
@@ -121,7 +167,10 @@ def load_math500(
     loader: Callable[..., Iterable[Mapping[str, object]]] | None = None,
 ) -> list[dict[str, object]]:
     rows = (loader or _dataset_loader())(
-        _MATH500_DATASET, split="test", cache_dir=cache_dir
+        _MATH500_DATASET,
+        split="test",
+        cache_dir=cache_dir,
+        revision=_MATH500_REVISION,
     )
     records: list[dict[str, object]] = [
         {
