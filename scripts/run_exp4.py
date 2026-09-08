@@ -313,8 +313,9 @@ def _run(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=str(ROOT / "configs" / "exp4.yaml"))
     parser.add_argument(
         "--phase",
+        nargs="+",
         choices=["direction", "generate", "judge", "analyze", "all"],
-        default="all",
+        default=["all"],
     )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--batch-prompts", type=int, default=256)
@@ -323,20 +324,22 @@ def _run(argv: list[str] | None = None) -> None:
     verify_manifest(_path(ROOT, "exp4_manifest.json"), cfg)
     write_manifest(_path(ROOT, "exp4_manifest.json"), cfg)
     with tee_stdout(ROOT / "logs" / "exp4.log"):
-        if args.phase in {"direction", "all"}:
+        if "all" in args.phase:
             direction_phase(cfg, ROOT, args.batch_prompts, args.limit)
-        if args.phase == "all":
             generate_validation_phase(cfg, ROOT, args.limit, args.batch_prompts)
             judge_validation_phase(cfg, ROOT, args.limit)
             analyze_selection(cfg, ROOT, args.limit)
             generate_test_phase(cfg, ROOT, args.limit, args.batch_prompts)
             judge_test_phase(cfg, ROOT, args.limit)
             analyze_results(cfg, ROOT, args.limit)
-        elif args.phase == "generate":
+            return
+        if "direction" in args.phase:
+            direction_phase(cfg, ROOT, args.batch_prompts, args.limit)
+        if "generate" in args.phase:
             generate_phase(cfg, ROOT, args.limit, args.batch_prompts)
-        elif args.phase == "judge":
+        if "judge" in args.phase:
             judge_phase(cfg, ROOT, args.limit)
-        elif args.phase == "analyze":
+        if "analyze" in args.phase:
             analyze(cfg, ROOT, args.limit)
 
 

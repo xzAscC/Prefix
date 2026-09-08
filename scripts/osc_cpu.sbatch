@@ -6,7 +6,6 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --requeue
-#SBATCH -J prefix-exp${EXP}
 #SBATCH -o logs/osc_cpu_exp%j.log
 
 set -euo pipefail
