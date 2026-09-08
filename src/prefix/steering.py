@@ -55,6 +55,10 @@ class SteeringSchedule:
     kind: str
     length: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.kind not in {"full", "prefix", "one_token"}:
+            raise ValueError(f"invalid steering schedule kind: {self.kind!r}")
+
     @classmethod
     def full(cls) -> SteeringSchedule:
         return cls("full")
