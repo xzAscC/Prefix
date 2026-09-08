@@ -18,7 +18,7 @@ EXP="${EXP:?EXP must be supplied with --export=EXP=N}"
 WORKSPACE="${WORKSPACE:-/fs/ess/PAS2324/zhu.3944/prefix}"
 cd "$WORKSPACE"
 
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:/fs/ess/PAS2324/zhu.3944/google-cloud-sdk/bin:$PATH"
 export HF_HOME="${HF_HOME:-/fs/ess/PAS2324/zhu.3944/hf-cache}"
 mkdir -p logs checkpoints figs
 
