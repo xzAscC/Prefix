@@ -233,20 +233,22 @@ def judge_harmbench(
             except RuntimeError:
                 return None, False
 
-        values = judge_batch(one, pending)
-        append_jsonl(
-            judge_path,
-            [
-                {
-                    "id": job[0],
-                    "alpha": job[1],
-                    "i": int(job[2]),
-                    "safe": safe,
-                    "blocked": blocked,
-                }
-                for job, (safe, blocked) in zip(pending, values)
-            ],
-        )
+        for start in range(0, len(pending), 64):
+            chunk = pending[start : start + 64]
+            values = judge_batch(one, chunk)
+            append_jsonl(
+                judge_path,
+                [
+                    {
+                        "id": job[0],
+                        "alpha": job[1],
+                        "i": int(job[2]),
+                        "safe": safe,
+                        "blocked": blocked,
+                    }
+                    for job, (safe, blocked) in zip(chunk, values)
+                ],
+            )
     require_complete(
         judge_path,
         [

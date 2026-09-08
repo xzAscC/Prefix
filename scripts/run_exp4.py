@@ -581,11 +581,9 @@ def _judge_phase(
                 "format_answer_is": None,
                 "answer_correct": None,
             },
-            expected_ids=(
-                expected_ids
-                if canonical_condition == canonical_conditions[-1]
-                else None
-            ),
+            expected_ids=[
+                f"{canonical_condition}/{sample_id}" for sample_id in sample_ids
+            ],
         )
 
 
@@ -643,6 +641,22 @@ def analyze_selection(cfg: dict[str, Any], work: Path, limit: int | None) -> Non
 
 def analyze_results(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
     selection = require_selection(_path(work, "exp4_selection.json"))
+    part = _partition(cfg)
+    test_ids = [str(index) for index in part["test"]]
+    if limit is not None:
+        test_ids = test_ids[:limit]
+    judged_ids = completed_ids(_path(work, "exp4_test_judge.jsonl"))
+    missing = [
+        f"{condition.replace('/', '_')}/{sample_id}"
+        for condition in ["baseline"] + list(selection)
+        for sample_id in test_ids
+        if f"{condition.replace('/', '_')}/{sample_id}" not in judged_ids
+    ]
+    if missing:
+        raise RuntimeError(
+            f"test judging incomplete; {len(missing)} missing ids, "
+            f"first few: {missing[:5]}"
+        )
     test = read_jsonl(_path(work, "exp4_test_judge.jsonl"))
     results: dict[str, Any] = {
         "baseline": {
@@ -680,7 +694,7 @@ def analyze(cfg: dict[str, Any], work: Path, limit: int | None = None) -> None:
         except (FileNotFoundError, RuntimeError, KeyError) as error:
             print(f"analyze: selection unavailable: {error}", flush=True)
             return
-    if read_json(_path(work, "exp4_test_judge.jsonl")) is None:
+    if not read_jsonl(_path(work, "exp4_test_judge.jsonl")):
         print("analyze: test judge is missing; skipping results", flush=True)
         return
     analyze_results(cfg, work, limit)
