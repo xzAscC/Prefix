@@ -47,7 +47,9 @@ def output_ids(request: Any) -> list[Any]:
 
 def main() -> None:
     global llm
-    llm = steering.make_llm("Qwen/Qwen3-4B")
+    llm = steering.make_llm(
+        "Qwen/Qwen3-4B", gpu_memory_utilization=0.75, max_model_len=8192
+    )
     core = llm.llm_engine.engine_core.engine_core
     describe(core, "engine_core")
     scheduler = getattr(core, "scheduler", None)

@@ -91,6 +91,16 @@ def _block(target: Any, layer: int) -> Any:
     return _engine_model(target).model.layers[layer]
 
 
+def _hidden_output(out: Any) -> Any:
+    return out[0] if isinstance(out, tuple) else out
+
+
+def _with_hidden_output(out: Any, hidden: Any) -> Any:
+    if isinstance(out, tuple):
+        return (hidden, *out[1:])
+    return hidden
+
+
 def attach_steering(
     llm: Any,
     layer: int,
@@ -114,20 +124,21 @@ def attach_steering(
         prefill = prefill_last_rows(metadata)
         decode = decode_rows(metadata)
         if prefill or decode:
-            out = out.clone()
-            edit = direction.to(device=out.device, dtype=out.dtype) * beta
+            hidden = _hidden_output(out).clone()
+            edit = direction.to(device=hidden.device, dtype=hidden.dtype) * beta
             for row in prefill or []:
                 if schedule.intervene_on_prefill():
-                    out[row] = out[row] + edit
+                    hidden[row] = hidden[row] + edit
             if decode and schedule.kind == "full":
                 for row in decode:
-                    out[row] = out[row] + edit
+                    hidden[row] = hidden[row] + edit
             elif decode and schedule.kind == "prefix":
                 indices = resolver(metadata) if resolver is not None else None
                 if indices is not None:
                     for row, k in zip(decode, indices):
                         if schedule.intervene_on_decode(k):
-                            out[row] = out[row] + edit
+                            hidden[row] = hidden[row] + edit
+            out = _with_hidden_output(out, hidden)
         return out
 
     block.forward = steered_forward
@@ -149,6 +160,7 @@ def attach_capture(
 
     def capturing_forward(*args: Any, **kwargs: Any) -> Any:
         out = original(*args, **kwargs)
+        hidden = _hidden_output(out)
         metadata = _current_attn_metadata()
         prefill = prefill_last_rows(metadata) or []
         decode = decode_rows(metadata) or []
@@ -161,7 +173,7 @@ def attach_capture(
                     "row": row,
                     "k": None,
                     "slot": slot,
-                    "hidden": _copy_hidden(out[row]),
+                    "hidden": _copy_hidden(hidden[row]),
                 }
             )
         for position, row in enumerate(decode):
@@ -177,7 +189,7 @@ def attach_capture(
                     "row": row,
                     "k": k,
                     "slot": slot,
-                    "hidden": _copy_hidden(out[row]),
+                    "hidden": _copy_hidden(hidden[row]),
                 }
             )
         return out
