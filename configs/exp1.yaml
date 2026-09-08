@@ -2,6 +2,8 @@
 model:
   id: Qwen/Qwen3-4B
   layer: 20
+  gpu_memory_utilization: 0.8
+  max_model_len: 8192
 direction:
   pos_dataset: LLM-LAT/benign-dataset
   neg_dataset: LLM-LAT/harmful-dataset
