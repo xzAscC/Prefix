@@ -144,10 +144,17 @@ def judge_jsonl(
     judge: Callable[[dict[str, Any]], dict[str, Any]],
     output_id: Callable[[dict[str, Any]], str] | None = None,
     blocked_result: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    unparseable_result: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    expected_ids: list[str] | None = None,
 ) -> None:
     require_complete(generation, expected, label=str(generation))
+    generation_rows = read_jsonl(generation)
+    if not generation_rows:
+        raise RuntimeError(f"{generation}: empty generation")
+
+    make_output_id = output_id or (lambda row: str(row["id"]))
     done = completed_ids(output)
-    rows = [row for row in read_jsonl(generation) if str(row["id"]) not in done]
+    rows = [row for row in generation_rows if make_output_id(row) not in done]
 
     def judge_item(row: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -157,33 +164,66 @@ def judge_jsonl(
                 blocked_result(row)
                 if blocked_result
                 else {
+                    "condition": None,
                     "format_boxed": None,
                     "format_answer_is": None,
                     "answer_correct": None,
                 }
             )
-            result["blocked"] = True
-            return result
-        except RuntimeError:
             result = {
+                "condition": None,
                 "format_boxed": None,
                 "format_answer_is": None,
                 "answer_correct": None,
-                "blocked": False,
-                "unparseable": True,
+                **result,
             }
+            result["blocked"] = True
+            result["unparseable"] = False
             return result
+        except RuntimeError:
+            result = (
+                unparseable_result(row)
+                if unparseable_result
+                else {
+                    "condition": None,
+                    "format_boxed": None,
+                    "format_answer_is": None,
+                    "answer_correct": None,
+                }
+            )
+            result = {
+                "condition": None,
+                "format_boxed": None,
+                "format_answer_is": None,
+                "answer_correct": None,
+                **result,
+            }
+            result["blocked"] = False
+            result["unparseable"] = True
+            return result
+        result = {
+            "condition": None,
+            "format_boxed": None,
+            "format_answer_is": None,
+            "answer_correct": None,
+            **result,
+        }
         result["blocked"] = False
+        result["unparseable"] = False
         return result
 
-    results = judge_batch(judge_item, rows, max_workers=8)
-    append_jsonl(
-        output,
-        [
-            {"id": output_id(row) if output_id else str(row["id"]), **result}
-            for row, result in zip(rows, results)
-        ],
-    )
+    for start in range(0, len(rows), 64):
+        chunk = rows[start : start + 64]
+        results = judge_batch(judge_item, chunk, max_workers=8)
+        append_jsonl(
+            output,
+            [
+                {"id": make_output_id(row), **result}
+                for row, result in zip(chunk, results)
+            ],
+        )
+    if expected_ids is not None:
+        require_complete(output, expected_ids, label=str(output))
 
 
 def steer_success(sign: str, result: dict[str, bool]) -> bool:
@@ -196,6 +236,26 @@ def unblocked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def blocked_count(rows: list[dict[str, Any]]) -> int:
     return sum(bool(row.get("blocked", False)) for row in rows)
+
+
+def unparseable_count(rows: list[dict[str, Any]]) -> int:
+    return sum(bool(row.get("unparseable", False)) for row in rows)
+
+
+def _summary(sign: str | None, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    clean_rows = unblocked(rows)
+    return {
+        "steer_success": (
+            None
+            if sign is None
+            else sum(steer_success(sign, row) for row in clean_rows)
+            / max(1, len(clean_rows))
+        ),
+        "a_math": sum(row["answer_correct"] for row in clean_rows)
+        / max(1, len(clean_rows)),
+        "blocked": blocked_count(rows),
+        "unparseable": unparseable_count(rows),
+    }
 
 
 def _path(work: Path, name: str) -> Path:
@@ -230,18 +290,9 @@ def _legacy_analyze(
             points = []
             for condition in group:
                 rows = [r for r in judges if r.get("condition") == condition.name]
-                clean_rows = unblocked(rows)
-                values = (
-                    sum(steer_success(sign, r) for r in clean_rows)
-                    / max(1, len(clean_rows)),
-                    sum(r["answer_correct"] for r in clean_rows)
-                    / max(1, len(clean_rows)),
-                )
-                scores[condition.name] = {
-                    "steer_success": values[0],
-                    "a_math": values[1],
-                    "blocked": blocked_count(rows),
-                }
+                summary = _summary(sign, rows)
+                values = (summary["steer_success"], summary["a_math"])
+                scores[condition.name] = summary
                 if scores[condition.name]["blocked"]:
                     print(
                         f"warning: {condition.name} has {scores[condition.name]['blocked']} blocked judge items",
@@ -263,20 +314,7 @@ def _legacy_analyze(
     test = read_jsonl(_path(work, "exp4_test_judge.jsonl"))
     results: dict[str, Any] = {
         "baseline": {
-            "steer_success": 0.0,
-            "a_math": sum(
-                r["answer_correct"]
-                for r in unblocked(
-                    [r for r in test if r.get("condition") == "baseline"]
-                )
-            )
-            / max(
-                1,
-                len(unblocked([r for r in test if r.get("condition") == "baseline"])),
-            ),
-            "blocked": blocked_count(
-                [r for r in test if r.get("condition") == "baseline"]
-            ),
+            **_summary(None, [r for r in test if r.get("condition") == "baseline"]),
         }
     }
     if results["baseline"]["blocked"]:
@@ -287,14 +325,7 @@ def _legacy_analyze(
     for key in selection:
         sign = key.split("/")[0]
         rows = [r for r in test if r.get("condition") == key.replace("/", "_")]
-        clean_rows = unblocked(rows)
-        results[key] = {
-            "steer_success": sum(steer_success(sign, r) for r in clean_rows)
-            / max(1, len(clean_rows)),
-            "a_math": sum(r["answer_correct"] for r in clean_rows)
-            / max(1, len(clean_rows)),
-            "blocked": blocked_count(rows),
-        }
+        results[key] = _summary(sign, rows)
         if results[key]["blocked"]:
             print(
                 f"warning: {key} has {results[key]['blocked']} blocked judge items",
@@ -355,6 +386,11 @@ def _run(argv: list[str] | None = None) -> None:
 def direction_phase(
     cfg: dict[str, Any], work: Path, batch_prompts: int, limit: int | None = None
 ) -> None:
+    directions_path = _path(work, "exp4_directions.json")
+    verify_manifest(_path(work, "exp4_manifest.json"), cfg)
+    if directions_path.exists():
+        print(f"direction: resuming verified checkpoint {directions_path}", flush=True)
+        return
     llm: Any = get_engine(
         cfg["model"]["id"],
         max_model_len=cfg["model"]["max_model_len"],
@@ -500,6 +536,20 @@ def _judge_phase(
             print("judge: selection is missing; skipping test judging", flush=True)
             return
         conditions = ["baseline"] + list(selection)
+    if "math500" in cfg:
+        part = _partition(cfg)
+        sample_ids = [str(index) for index in part["val" if phase == "val" else "test"]]
+    else:
+        first_path = _path(work, f"exp4_{phase}_{conditions[0]}.jsonl")
+        sample_ids = [str(row["id"]) for row in read_jsonl(first_path)]
+    if phase == "test" and limit is not None:
+        sample_ids = sample_ids[:limit]
+    canonical_conditions = [condition.replace("/", "_") for condition in conditions]
+    expected_ids = [
+        f"{condition}/{sample_id}"
+        for condition in canonical_conditions
+        for sample_id in sample_ids
+    ]
     for condition in conditions:
         path = _path(work, f"exp4_{phase}_{condition.replace('/', '_')}.jsonl")
         if not path.exists():
@@ -509,21 +559,33 @@ def _judge_phase(
             continue
         rows = read_jsonl(path)
         expected = [str(row["id"]) for row in rows]
+        canonical_condition = condition.replace("/", "_")
         judge_jsonl(
             path,
             _path(work, f"exp4_{phase}_judge.jsonl"),
             expected,
             lambda row, name=condition: {
-                "condition": name,
+                "condition": name.replace("/", "_"),
                 **judge.judge_math(row["text"], str(records[int(row["id"])]["answer"])),
             },
-            output_id=lambda row, name=condition: f"{name}/{row['id']}",
+            output_id=lambda row, name=canonical_condition: f"{name}/{row['id']}",
             blocked_result=lambda row, name=condition: {
-                "condition": name,
+                "condition": name.replace("/", "_"),
                 "format_boxed": None,
                 "format_answer_is": None,
                 "answer_correct": None,
             },
+            unparseable_result=lambda row, name=condition: {
+                "condition": name.replace("/", "_"),
+                "format_boxed": None,
+                "format_answer_is": None,
+                "answer_correct": None,
+            },
+            expected_ids=(
+                expected_ids
+                if canonical_condition == canonical_conditions[-1]
+                else None
+            ),
         )
 
 
@@ -556,18 +618,9 @@ def analyze_selection(cfg: dict[str, Any], work: Path, limit: int | None) -> Non
             points = []
             for condition in group:
                 rows = [r for r in judges if r.get("condition") == condition.name]
-                clean_rows = unblocked(rows)
-                values = (
-                    sum(steer_success(sign, r) for r in clean_rows)
-                    / max(1, len(clean_rows)),
-                    sum(r["answer_correct"] for r in clean_rows)
-                    / max(1, len(clean_rows)),
-                )
-                scores[condition.name] = {
-                    "steer_success": values[0],
-                    "a_math": values[1],
-                    "blocked": blocked_count(rows),
-                }
+                summary = _summary(sign, rows)
+                values = (summary["steer_success"], summary["a_math"])
+                scores[condition.name] = summary
                 if scores[condition.name]["blocked"]:
                     print(
                         f"warning: {condition.name} has {scores[condition.name]['blocked']} blocked judge items",
@@ -593,33 +646,13 @@ def analyze_results(cfg: dict[str, Any], work: Path, limit: int | None) -> None:
     test = read_jsonl(_path(work, "exp4_test_judge.jsonl"))
     results: dict[str, Any] = {
         "baseline": {
-            "steer_success": 0.0,
-            "a_math": sum(
-                r["answer_correct"]
-                for r in unblocked(
-                    [r for r in test if r.get("condition") == "baseline"]
-                )
-            )
-            / max(
-                1,
-                len(unblocked([r for r in test if r.get("condition") == "baseline"])),
-            ),
-            "blocked": blocked_count(
-                [r for r in test if r.get("condition") == "baseline"]
-            ),
+            **_summary(None, [r for r in test if r.get("condition") == "baseline"]),
         }
     }
     for key in selection:
         sign = key.split("/")[0]
         rows = [r for r in test if r.get("condition") == key.replace("/", "_")]
-        clean_rows = unblocked(rows)
-        results[key] = {
-            "steer_success": sum(steer_success(sign, r) for r in clean_rows)
-            / max(1, len(clean_rows)),
-            "a_math": sum(r["answer_correct"] for r in clean_rows)
-            / max(1, len(clean_rows)),
-            "blocked": blocked_count(rows),
-        }
+        results[key] = _summary(sign, rows)
         if results[key]["blocked"]:
             print(
                 f"warning: {key} has {results[key]['blocked']} blocked judge items",
