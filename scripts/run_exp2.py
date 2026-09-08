@@ -230,6 +230,8 @@ def judge_harmbench(
                 )
             except JudgeBlocked:
                 return None, True
+            except RuntimeError:
+                return None, False
 
         values = judge_batch(one, pending)
         append_jsonl(
@@ -272,7 +274,7 @@ def analyze(
         values = [
             bool(row["safe"])
             for row in judge_rows
-            if float(row["alpha"]) == float(alpha) and not row.get("blocked", False)
+            if float(row["alpha"]) == float(alpha) and row["safe"] is not None
         ]
         blocked[str(alpha)] = sum(
             1

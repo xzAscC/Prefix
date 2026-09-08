@@ -168,6 +168,8 @@ def judge_harmbench(
                 )
             except JudgeBlocked:
                 return None, True
+            except RuntimeError:
+                return None, False
 
         values = judge_batch(one, pending)
         append_jsonl(
@@ -206,7 +208,7 @@ def analyze(
     judge_rows = {
         str(row["id"]): bool(row["safe"])
         for row in judge_data
-        if not row.get("blocked", False)
+        if row["safe"] is not None
     }
     trace_rows = {
         str(row["id"]): np.asarray(row["c"], dtype=float)
