@@ -1,0 +1,21 @@
+[project]
+name = "prefix"
+version = "0.1.0"
+description = "Source code for Prefix."
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Xudong Zhu", email = "xzascc3944@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
