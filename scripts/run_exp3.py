@@ -405,8 +405,9 @@ def _run(argv: list[str] | None = None) -> None:
     parser.add_argument("--config", default=str(ROOT / "configs" / "exp3.yaml"))
     parser.add_argument(
         "--phase",
+        nargs="+",
         choices=["direction", "generate", "judge", "analyze", "all"],
-        default="all",
+        default=["all"],
     )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--batch-prompts", type=int, default=256)
@@ -416,20 +417,22 @@ def _run(argv: list[str] | None = None) -> None:
     verify_manifest(_paths(work, "exp3_manifest.json"), cfg)
     write_manifest(_paths(work, "exp3_manifest.json"), cfg)
     with tee_stdout(work / "logs" / "exp3.log"):
-        if args.phase in {"direction", "all"}:
+        if "all" in args.phase:
             direction_phase(cfg, work, args.batch_prompts, args.limit)
-        if args.phase == "all":
             generate_validation_phase(cfg, work, args.limit, args.batch_prompts)
             judge_validation_phase(cfg, work, args.limit)
             analyze_selection(cfg, work, args.limit)
             generate_test_phase(cfg, work, args.limit, args.batch_prompts)
             judge_test_phase(cfg, work, args.limit)
             analyze_results(cfg, work, args.limit)
-        elif args.phase == "generate":
+            return
+        if "direction" in args.phase:
+            direction_phase(cfg, work, args.batch_prompts, args.limit)
+        if "generate" in args.phase:
             generate_phase(cfg, work, args.limit, args.batch_prompts)
-        elif args.phase == "judge":
+        if "judge" in args.phase:
             judge_phase(cfg, work, args.limit)
-        elif args.phase == "analyze":
+        if "analyze" in args.phase:
             analyze(cfg, work, args.limit)
 
 

@@ -312,6 +312,9 @@ def main(argv: list[str] | None = None) -> None:
                 llm = get_engine(
                     config["model"]["id"],
                     max_model_len=config["model"].get("max_model_len"),
+                    gpu_memory_utilization=float(
+                        config["model"].get("gpu_memory_utilization", 0.9)
+                    ),
                 )
                 generate_harmbench(
                     llm,

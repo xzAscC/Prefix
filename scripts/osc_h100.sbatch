@@ -7,7 +7,6 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH -t 4:00:00
 #SBATCH --requeue
-#SBATCH -J prefix-exp${EXP}
 #SBATCH -o logs/osc_h100_exp%j.log
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
