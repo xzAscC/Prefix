@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import importlib
+import threading
+import time
 from typing import Any, Callable
 
 import pytest
 
 judge_module = importlib.import_module("prefix.judge")
 GeminiJudge = judge_module.GeminiJudge
+JudgeBlocked = judge_module.JudgeBlocked
+judge_batch = judge_module.judge_batch
 
 
 def _response(text: str) -> dict[str, Any]:
@@ -187,3 +191,78 @@ def test_project_without_argument_or_environment_raises(
     monkeypatch.setattr(judge_module, "ensure_env", lambda: None)
     with pytest.raises(RuntimeError, match="GOOGLE_CLOUD_PROJECT"):
         GeminiJudge(token_provider=lambda: "token", transport=FakeTransport([]))
+
+
+class FakeBatchJudge:
+    def __init__(self, delay: float = 0.1, failing_item: int | None = None) -> None:
+        self.delay = delay
+        self.failing_item = failing_item
+        self._lock = threading.Lock()
+        self.active = 0
+        self.peak = 0
+
+    def __call__(self, item: int) -> int:
+        with self._lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            time.sleep(self.delay)
+            if item == self.failing_item:
+                raise RuntimeError(f"failed item {item}")
+            return item * 2
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+def test_judge_batch_preserves_order_and_bounds_concurrency() -> None:
+    judge = FakeBatchJudge()
+
+    results = judge_batch(judge, range(8), max_workers=4)
+
+    assert results == [0, 2, 4, 6, 8, 10, 12, 14]
+    assert judge.peak <= 4
+
+
+def test_judge_batch_runs_concurrently() -> None:
+    judge = FakeBatchJudge()
+    started = time.monotonic()
+
+    judge_batch(judge, range(8), max_workers=4)
+
+    assert time.monotonic() - started < 0.35
+
+
+def test_judge_batch_propagates_item_exception() -> None:
+    with pytest.raises(RuntimeError, match="failed item 3"):
+        judge_batch(FakeBatchJudge(failing_item=3), range(8), max_workers=4)
+
+
+def test_judge_batch_rejects_nonpositive_worker_count() -> None:
+    with pytest.raises(ValueError, match="max_workers"):
+        judge_batch(FakeBatchJudge(), [1], max_workers=0)
+
+
+def test_request_body_sets_output_budget_and_safety_off() -> None:
+    transport = FakeTransport([(200, _response("LABEL: SAFE"))])
+    _judge(transport).judge_safety("harmful request", "benign response")
+    _, _, body = transport.calls[0]
+    assert body["generationConfig"]["maxOutputTokens"] == 8192
+    categories = {item["category"] for item in body["safetySettings"]}
+    assert categories == {
+        "HARM_CATEGORY_HARASSMENT",
+        "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "HARM_CATEGORY_DANGEROUS_CONTENT",
+    }
+    assert all(item["threshold"] == "BLOCK_NONE" for item in body["safetySettings"])
+
+
+def test_blocked_prompt_raises_judge_blocked() -> None:
+    blocked_payload = {
+        "promptFeedback": {"blockReason": "SAFETY"},
+        "candidates": [],
+    }
+    transport = FakeTransport([(200, blocked_payload)])
+    with pytest.raises(JudgeBlocked, match="SAFETY"):
+        _judge(transport).judge_safety("harmful request", "unsafe response")
