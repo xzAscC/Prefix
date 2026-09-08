@@ -30,6 +30,20 @@ class FakeLayer:
         self.forward = forward
 
 
+class FakeTupleLayer(FakeLayer):
+    """vllm>=0.28 decoder layers return (hidden_states, residual)."""
+
+    def __init__(self, dtype=torch.float32):
+        super().__init__(dtype)
+
+        original = self.forward
+
+        def forward(hidden):
+            return original(hidden), hidden.to(self.dtype)
+
+        self.forward = forward
+
+
 def test_prefill_rows_skip_chunked_and_single_token_prefills():
     metadata = FakeMetadata([3, 2, 1, 4], torch.tensor([0, 1, 0, 0]))
     assert prefill_last_rows(metadata) == [2, 9]
@@ -83,6 +97,23 @@ def test_one_token_skips_decode_and_prefix_uses_resolver(monkeypatch):
     result = layer.forward(torch.zeros(4, 2))
     assert torch.equal(result[2], direction)
     assert torch.equal(result[3], torch.zeros(2))
+
+
+def test_tuple_output_layers_are_steered_and_captured(monkeypatch):
+    metadata = FakeMetadata([2, 1, 1], torch.tensor([0, 2, 3]))
+    monkeypatch.setattr("prefix.vllm_steering._current_attn_metadata", lambda: metadata)
+    direction = torch.ones(2)
+    layer = FakeTupleLayer()
+    sink = CaptureSink()
+    attach_steering(layer, 0, direction, 1, 1, SteeringSchedule("full"))
+    attach_capture(layer, 0, sink)
+    result = layer.forward(torch.zeros(4, 2))
+    assert isinstance(result, tuple)
+    hidden, residual = result
+    assert torch.equal(hidden[2], direction)
+    assert torch.equal(residual[2], torch.zeros(2))
+    steered_prefill_row = [r for r in sink.rows if r["phase"] == "prefill"]
+    assert torch.equal(steered_prefill_row[0]["hidden"], direction)
 
     with pytest.raises(RuntimeError, match="resolver"):
         attach_steering(layer, 0, direction, 1, 1, SteeringSchedule.prefix(5))
