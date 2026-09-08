@@ -157,6 +157,8 @@ def judge_jsonl(
             result = blocked_result(row) if blocked_result else {}
             result["blocked"] = True
             return result
+        except RuntimeError:
+            return {"safe": None, "blocked": False}
         result = result if isinstance(result, dict) else {"safe": bool(result)}
         result["blocked"] = False
         return result
@@ -271,7 +273,7 @@ def analyze(
         points = []
         for condition in group:
             judged = [row for row in val_judge if row["condition"] == condition.name]
-            clean_judged = [row for row in judged if not row.get("blocked", False)]
+            clean_judged = [row for row in judged if row["safe"] is not None]
             answers_rows = read_jsonl(
                 _paths(work, f"exp3_val_{condition.name}_mmlu.jsonl")
             )
@@ -313,7 +315,7 @@ def analyze(
                 [
                     r["safe"]
                     for r in test_judge
-                    if r["condition"] == "baseline" and not r.get("blocked", False)
+                    if r["condition"] == "baseline" and r["safe"] is not None
                 ]
             ),
             "a_mmlu": _letter_accuracy(
@@ -335,7 +337,7 @@ def analyze(
         name = schedule
         rows = [r for r in test_judge if r["condition"] == name]
         results[name] = {
-            "p_safe": mean([r["safe"] for r in rows if not r.get("blocked", False)]),
+            "p_safe": mean([r["safe"] for r in rows if r["safe"] is not None]),
             "a_mmlu": _letter_accuracy(
                 test_truth,
                 read_jsonl(_paths(work, f"exp3_test_{name}_mmlu.jsonl")),

@@ -164,6 +164,15 @@ def judge_jsonl(
             )
             result["blocked"] = True
             return result
+        except RuntimeError:
+            result = {
+                "format_boxed": None,
+                "format_answer_is": None,
+                "answer_correct": None,
+                "blocked": False,
+                "unparseable": True,
+            }
+            return result
         result["blocked"] = False
         return result
 
@@ -182,7 +191,7 @@ def steer_success(sign: str, result: dict[str, bool]) -> bool:
 
 
 def unblocked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [row for row in rows if not row.get("blocked", False)]
+    return [row for row in rows if row.get("answer_correct") is not None]
 
 
 def blocked_count(rows: list[dict[str, Any]]) -> int:
@@ -446,11 +455,14 @@ def generate_test_phase(
                 schedule_for(schedule),
                 1.0 if sign == "pos" else -1.0,
             )
+        test_ids = list(part["test"])
+        if limit is not None:
+            test_ids = test_ids[:limit]
         prompts = [
             chat_prompt(
                 tokenizer, neutral_math_prompt(str(records[i]["problem"])), True
             )
-            for i in part["test"]
+            for i in test_ids
         ]
         generate_jsonl(
             llm,
@@ -459,7 +471,7 @@ def generate_test_phase(
             spec,
             cfg["generation"]["max_new_tokens"],
             batch_prompts,
-            [str(i) for i in part["test"]],
+            [str(i) for i in test_ids],
         )
 
 
