@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from pathlib import Path
+
+import pytest
 
 from prefix import data  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -82,12 +85,16 @@ def test_load_mmlu_pro_normalizes_and_sorts() -> None:
         {"question": "z", "options": ["a"] * 10, "answer_index": 9, "category": "b"},
         {"question": "a", "options": ["b"] * 10, "answer_index": 1, "category": "a"},
     ]
-    calls: list[tuple[str, str]] = []
+    calls: list[tuple[str, str, str]] = []
 
     def loader(
-        name: str, *, split: str, cache_dir: Path | None = None
+        name: str,
+        *,
+        split: str,
+        cache_dir: Path | None = None,
+        revision: str,
     ) -> list[dict[str, object]]:
-        calls.append((name, split))
+        calls.append((name, split, revision))
         return rows
 
     result = data.load_mmlu_pro("test", loader=loader)
@@ -107,15 +114,36 @@ def test_load_mmlu_pro_normalizes_and_sorts() -> None:
             "category": "b",
         },
     ]
-    assert calls == [("TIGER-Lab/MMLU-Pro", "test")]
+    assert calls == [("TIGER-Lab/MMLU-Pro", "test", data._MMLU_PRO_REVISION)]
+
+
+def test_data_sources_use_immutable_revisions() -> None:
+    assert re.fullmatch(r"[0-9a-f]{40}", data._MMLU_PRO_REVISION)
+    assert re.fullmatch(r"[0-9a-f]{40}", data._MATH500_REVISION)
+    assert re.match(
+        r"https://raw\.githubusercontent\.com/[^/]+/[^/]+/[0-9a-f]{40}/.+$",
+        data.HARMBENCH_URL,
+    )
 
 
 def test_mmlu_exp2_subset_is_sorted_reproducible_and_supports_override() -> None:
+    default_subset = data.mmlu_exp2_subset()
+    assert len(default_subset) == 500
+    assert default_subset == sorted(set(default_subset))
+    assert max(default_subset) > 499
+    assert default_subset == data.mmlu_exp2_subset()
+
     subset = data.mmlu_exp2_subset(n=10, seed=7, n_total=30)
     assert len(subset) == 10
     assert subset == sorted(subset)
     assert subset == data.mmlu_exp2_subset(n=10, seed=7, n_total=30)
     assert max(subset) < 30
+
+
+@pytest.mark.parametrize("n", [-1, 31])
+def test_mmlu_exp2_subset_rejects_invalid_n(n: int) -> None:
+    with pytest.raises(ValueError, match="between"):
+        data.mmlu_exp2_subset(n=n, n_total=30)
 
 
 def test_load_math500_normalizes_and_sorts() -> None:
@@ -125,10 +153,15 @@ def test_load_math500_normalizes_and_sorts() -> None:
     ]
 
     def loader(
-        name: str, *, split: str, cache_dir: Path | None = None
+        name: str,
+        *,
+        split: str,
+        cache_dir: Path | None = None,
+        revision: str,
     ) -> list[dict[str, object]]:
         assert name == "HuggingFaceH4/MATH-500"
         assert split == "test"
+        assert revision == data._MATH500_REVISION
         return rows
 
     assert data.load_math500(loader=loader) == [
@@ -165,3 +198,39 @@ def test_prompt_builders_strip_problem_whitespace() -> None:
         == "  Solve this. Reason step by step and end your response with ``The answer is {}.''."
     )
     assert data.neutral_math_prompt(problem) == "  Solve this. Reason step by step."
+
+
+@pytest.mark.parametrize(
+    "dataset,rows,expected",
+    [
+        ("LLM-LAT/benign-dataset", [{"TEXT": "a"}, {"behavior": "b"}], ["a", "b"]),
+        ("LLM-LAT/harmful-dataset", [{"prompt": "a"}, {"text": "b"}], ["a", "b"]),
+    ],
+)
+def test_load_llm_lat_uses_pinned_train_loader(
+    dataset: str,
+    rows: list[dict[str, object]],
+    expected: list[str],
+) -> None:
+    calls: list[tuple[str, str, object, str]] = []
+
+    def loader(name: str, *, split: str, cache_dir, revision: str):
+        calls.append((name, split, cache_dir, revision))
+        return rows
+
+    assert (
+        data.load_llm_lat(dataset, 2, cache_dir=Path("cache"), loader=loader)
+        == expected
+    )
+    assert calls == [
+        (dataset, "train", Path("cache"), data._LLM_LAT_REVISIONS[dataset])
+    ]
+
+
+def test_load_llm_lat_rejects_short_dataset() -> None:
+    with pytest.raises(ValueError, match="fewer than 2"):
+        data.load_llm_lat(
+            "LLM-LAT/benign-dataset",
+            2,
+            loader=lambda *args, **kwargs: [{"prompt": "one"}],
+        )
