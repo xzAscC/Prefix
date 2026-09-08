@@ -83,6 +83,8 @@ def mean_trajectories_by_label(
 ) -> dict[bool, np.ndarray]:
     """Average variable-length traces independently for each boolean label."""
     labels = np.asarray(labels, dtype=bool)
+    if len(traces) != len(labels):
+        raise ValueError("traces and labels must have the same length")
     result: dict[bool, np.ndarray] = {}
     for label in (False, True):
         selected = [

@@ -64,6 +64,20 @@ def test_mean_trajectories_skips_labels_with_no_examples() -> None:
     np.testing.assert_allclose(result[True], [1.0])
 
 
+@pytest.mark.parametrize(
+    ("traces", "labels"),
+    [
+        ([np.array([1.0])], np.array([True, False])),
+        ([np.array([1.0]), np.array([2.0])], np.array([True])),
+    ],
+)
+def test_mean_trajectories_rejects_trace_label_length_mismatch(
+    traces: list[np.ndarray], labels: np.ndarray
+) -> None:
+    with pytest.raises(ValueError, match="same length"):
+        mean_trajectories_by_label(traces, labels)
+
+
 def test_pareto_frontier_returns_maximizers_and_keeps_equal_points() -> None:
     points = [(1.0, 1.0), (2.0, 0.5), (1.5, 2.0), (1.0, 0.5), (1.5, 2.0)]
     assert pareto_frontier(points) == [1, 2, 4]
