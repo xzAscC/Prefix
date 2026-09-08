@@ -120,3 +120,8 @@ def test_schedule_rejects_invalid_prefix_and_decode_index() -> None:
         SteeringSchedule.prefix(0)
     with pytest.raises(ValueError, match="1-based"):
         SteeringSchedule.full().intervene_on_decode(0)
+
+
+def test_schedule_rejects_invalid_kind() -> None:
+    with pytest.raises(ValueError, match="kind"):
+        SteeringSchedule("invalid")
