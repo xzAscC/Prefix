@@ -78,7 +78,7 @@ def test_one_token_skips_decode_and_prefix_uses_resolver(monkeypatch):
         1,
         1,
         SteeringSchedule.prefix(2),
-        decode_index_resolver=lambda _metadata: [0, 2],
+        decode_index_resolver=lambda _metadata: [1, 3],
     )
     result = layer.forward(torch.zeros(4, 2))
     assert torch.equal(result[2], direction)
