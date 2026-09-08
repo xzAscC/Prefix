@@ -1,0 +1,30 @@
+# Experiment 4: MATH-500 response-format direction, bidirectional steering
+model:
+  id: Qwen/Qwen3-4B
+math500:
+  partition:
+    n_direction: 50
+    n_val: 50
+    n_test: 400
+    seed: 42
+direction:
+  position: last_prompt_token
+  method: dim
+  # prompt suffixes live in src/prefix/data.py (direction_prompt / neutral_math_prompt)
+schedules: [full, prefix-5, one-token]   # same grid/selection as exp3
+grid:
+  layers: [1, 5, 8, 12, 16, 19, 23, 27, 30, 34]
+  alphas: [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
+  signs: [+1, -1]
+selection:
+  pareto: true
+  capability_cap: 0.9     # A_math >= 0.9 * unsteered
+  objective: max_steer_success
+generation:
+  max_new_tokens: 4096
+  temperature: 0.0
+  enable_thinking: true
+judge:
+  model: gemini-3.7-flash
+  region: global
+seed: 42

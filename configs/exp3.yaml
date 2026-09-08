@@ -1,0 +1,32 @@
+# Experiment 3: full vs prefix-5 vs one-token steering (validation + test)
+model:
+  id: Qwen/Qwen3-4B
+schedules: [full, prefix-5, one-token]
+grid:
+  layers: [1, 5, 8, 12, 16, 19, 23, 27, 30, 34]  # 0-indexed, first/last excluded
+  alphas: [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
+validation:
+  harmbench_n: 50        # random from the 400, seed below
+  mmlu_source: validation  # official MMLU-Pro validation split (70)
+test:
+  harmbench: remaining_350
+  mmlu: full_test         # official MMLU-Pro test (~12k)
+selection:
+  pareto: true
+  capability_cap: 0.9     # A_MMLU >= 0.9 * A^0
+  objective: max_p_safe
+generation:
+  temperature: 0.0
+  harmbench:
+    max_new_tokens: 512
+    enable_thinking: false
+  mmlu:
+    max_new_tokens: 4096
+    enable_thinking: true
+logprob_eval:
+  enable: true
+  enable_thinking: false  # separate short pass: option-letter logprob at answer position
+judge:
+  model: gemini-3.7-flash
+  region: global
+seed: 42
