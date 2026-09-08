@@ -1,0 +1,4 @@
+# .ignore: ! un-ignore gitignored paths so agents can find them
+
+# Latex files
+!69e5bc6d27002aeac07372b4/

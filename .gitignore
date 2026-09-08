@@ -1,0 +1,24 @@
+# agent files
+
+.omo/
+
+# latex files
+69e5bc6d27002aeac07372b4/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+.ruff_cache/
+
+# experiment outputs
+logs/*
+!logs/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
+figs/*
+!figs/.gitkeep
+data/*
+!data/.gitkeep
