@@ -1,6 +1,8 @@
 # Experiment 4: MATH-500 response-format direction, bidirectional steering
 model:
   id: Qwen/Qwen3-4B
+  gpu_memory_utilization: 0.8
+  max_model_len: 12288
 math500:
   partition:
     n_direction: 50
@@ -11,10 +13,17 @@ direction:
   position: last_prompt_token
   method: dim
   # prompt suffixes live in src/prefix/data.py (direction_prompt / neutral_math_prompt)
+validation:
+  max_new_tokens: 1024    # C-mild: validation-only generation cap; test uses full 4096
 schedules: [full, prefix-5, one-token]   # same grid/selection as exp3
 grid:
   layers: [1, 5, 8, 12, 16, 19, 23, 27, 30, 34]
-  alphas: [0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
+  # alpha domain split by schedule (same rationale as exp3): full caps at 1,
+  # sparse (prefix-5 / one-token) starts at 1.
+  alphas_by_schedule:
+    full: [0.01, 0.03, 0.1, 0.3, 1.0]
+    prefix-5: [1.0, 3.0, 10.0, 30.0, 100.0]
+    one-token: [1.0, 3.0, 10.0, 30.0, 100.0]
   signs: [+1, -1]
 selection:
   pareto: true
