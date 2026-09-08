@@ -18,7 +18,7 @@ WORKSPACE="${WORKSPACE:-/fs/ess/PAS2324/zhu.3944/prefix}"
 cd "$WORKSPACE"
 
 export PATH="$HOME/.local/bin:$PATH"
-export HF_HOME="$WORKSPACE/hf_cache"
+export HF_HOME="${HF_HOME:-/fs/ess/PAS2324/zhu.3944/hf-cache}"
 mkdir -p logs checkpoints figs
 
 exec uv run python "scripts/run_exp${EXP}.py" \
