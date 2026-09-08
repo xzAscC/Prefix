@@ -280,6 +280,7 @@ def test_blocked_math_item_isolated_and_excluded_from_scores(
     cfg = config()
     cfg["schedules"] = ["full"]
     cfg["grid"] = {"layers": [20], "alphas_by_schedule": {"full": [0.1]}}
+    cfg["math500"] = {"partition": {"n_direction": 0, "n_val": 2, "seed": 42}}
     monkeypatch.setattr(exp4, "validation_conditions", real_validation_conditions)
     val_judge = tmp_path / "checkpoints" / "exp4_val_judge.jsonl"
     exp4.append_jsonl(
