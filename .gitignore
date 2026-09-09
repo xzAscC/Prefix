@@ -15,6 +15,7 @@ __pycache__/
 .ruff_cache/
 
 # experiment outputs
+/results/
 logs/*
 !logs/.gitkeep
 checkpoints/*
