@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,199 @@ def test_jsonl_resume_and_atomic_json(tmp_path: Path) -> None:
     runner.write_json_atomic(atomic, {"ok": True})
     assert runner.read_json(atomic) == {"ok": True}
     assert runner.read_json(tmp_path / "missing.json", default=[]) == []
+
+
+@pytest.mark.parametrize("operation", ["append", "atomic"])
+def test_persistence_rejects_symlinked_destination_and_parent(
+    tmp_path: Path, operation: str
+) -> None:
+    victim = tmp_path / "victim.json"
+    victim.write_text("do not overwrite", encoding="utf-8")
+    destination = tmp_path / "destination.json"
+    destination.symlink_to(victim)
+
+    with pytest.raises(ValueError, match="symlink"):
+        if operation == "append":
+            runner.append_jsonl(destination, [{"id": "blocked"}])
+        else:
+            runner.write_json_atomic(destination, {"blocked": True})
+    assert victim.read_text(encoding="utf-8") == "do not overwrite"
+
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path / "real-parent", target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        if operation == "append":
+            runner.append_jsonl(linked_parent / "results.jsonl", [{"id": "blocked"}])
+        else:
+            runner.write_json_atomic(linked_parent / "state.json", {"blocked": True})
+
+
+def test_atomic_json_ignores_predictable_temp_symlink_without_clobbering_target(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "state.json"
+    victim = tmp_path / "victim.json"
+    victim.write_text("safe", encoding="utf-8")
+    predictable = tmp_path / ".state.json.tmp"
+    predictable.symlink_to(victim)
+
+    runner.write_json_atomic(destination, {"ok": True})
+
+    assert runner.read_json(destination) == {"ok": True}
+    assert victim.read_text(encoding="utf-8") == "safe"
+    assert predictable.is_symlink()
+
+
+def test_append_jsonl_repairs_valid_unterminated_and_torn_tail(tmp_path: Path) -> None:
+    path = tmp_path / "results.jsonl"
+    path.write_bytes(b'{"id":"complete"}')
+    runner.append_jsonl(path, [{"id": "next"}])
+    assert runner.read_jsonl(path) == [
+        {"id": "complete"},
+        {"id": "next"},
+    ]
+
+    path.write_bytes(b'{"id":"complete"}\n{"id":"torn"')
+    runner.append_jsonl(path, [{"id": "repaired"}])
+    assert runner.read_jsonl(path) == [
+        {"id": "complete"},
+        {"id": "repaired"},
+    ]
+
+
+def test_append_jsonl_reads_only_bounded_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "results.jsonl"
+    path.write_bytes(b'{"id":"old"}\n' + b" " * 128 + b'{"id":"last"}')
+    reads: list[int | None] = []
+    original_open = Path.open
+
+    class ReadSpy:
+        def __init__(self, file_object: Any) -> None:
+            self.file_object = file_object
+
+        def __enter__(self) -> "ReadSpy":
+            self.file_object.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self.file_object.__exit__(*args)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.file_object, name)
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(None if size == -1 else size)
+            return self.file_object.read(size)
+
+    def open_with_spy(self: Path, *args: Any, **kwargs: Any) -> ReadSpy:
+        return ReadSpy(original_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", open_with_spy)
+    runner.append_jsonl(path, [{"id": "new"}])
+    assert reads and all(size is not None for size in reads)
+    assert max(size for size in reads if size is not None) <= runner.JSONL_TAIL_BYTES
+
+
+def test_append_jsonl_does_not_read_or_copy_the_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "large.jsonl"
+    path.write_bytes(
+        b"".join(
+            (json.dumps({"id": str(index)}) + "\n").encode("utf-8")
+            for index in range(20_000)
+        )
+    )
+    read_bytes = 0
+    original_open = Path.open
+
+    class ReadSpy:
+        def __init__(self, file_object: Any) -> None:
+            self.file_object = file_object
+
+        def __enter__(self) -> "ReadSpy":
+            self.file_object.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self.file_object.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            nonlocal read_bytes
+            value = self.file_object.read(size)
+            read_bytes += len(value)
+            return value
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.file_object, name)
+
+    def open_with_spy(self: Path, *args: Any, **kwargs: Any) -> ReadSpy:
+        return ReadSpy(original_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", open_with_spy)
+    runner.append_jsonl(path, [{"id": "new"}])
+    assert read_bytes <= runner.JSONL_TAIL_BYTES
+
+
+def test_prepare_checkpoint_manifest_fails_closed_and_writes_clean_run_atomically(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    rows = tmp_path / "responses.jsonl"
+    config = {
+        "model_slug": "Qwen/Qwen3-4B",
+        "model_revision": "revision-a",
+        "dataset_manifest": {"math500": {"split": "test", "count": 500}},
+        "prompt_template_version": "chat-v1",
+        "sampling": {"temperature": 0.0, "logprobs": 1},
+        "batch_prompts": 32,
+        "max_model_len": 8192,
+        "schema_version": 1,
+    }
+
+    runner.prepare_checkpoint_manifest(manifest, config, checkpoint_paths=[rows])
+    written_manifest = runner.read_json(manifest)
+    assert isinstance(written_manifest, dict)
+    assert written_manifest["config"] == config
+    runner.append_jsonl(rows, [{"id": "0"}])
+    runner.verify_manifest(manifest, config, checkpoint_paths=[rows])
+
+    manifest.unlink()
+    with pytest.raises(RuntimeError, match="missing checkpoint manifest"):
+        runner.verify_manifest(manifest, config, checkpoint_paths=[rows])
+    with pytest.raises(RuntimeError, match="missing checkpoint manifest"):
+        runner.prepare_checkpoint_manifest(manifest, config, checkpoint_paths=[rows])
+
+
+def test_manifest_rejects_each_configuration_change(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    config = {
+        "model_slug": "model",
+        "model_revision": "revision-a",
+        "dataset_manifest": {"math500": {"split": "test", "count": 500}},
+        "prompt_template_version": "chat-v1",
+        "sampling": {"temperature": 0.0, "logprobs": 1},
+        "batch_prompts": 32,
+        "max_model_len": 8192,
+        "schema_version": 1,
+    }
+    runner.write_manifest(manifest, config)
+    for key, value in {
+        "model_slug": "other",
+        "model_revision": "revision-b",
+        "dataset_manifest": {"math500": {"split": "test", "count": 499}},
+        "prompt_template_version": "chat-v2",
+        "sampling": {"temperature": 0.1, "logprobs": 2},
+        "batch_prompts": 64,
+        "max_model_len": 4096,
+        "schema_version": 2,
+    }.items():
+        changed = deepcopy(config)
+        changed[key] = value
+        with pytest.raises(RuntimeError, match="stale"):
+            runner.verify_manifest(manifest, changed)
 
 
 @pytest.mark.parametrize(

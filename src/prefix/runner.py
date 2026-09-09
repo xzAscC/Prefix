@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 from contextlib import contextmanager
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import torch
 import yaml
@@ -25,6 +28,7 @@ from .vllm_steering import (
 _engine_singleton: Any | None = None
 _engine_config: tuple[str, tuple[tuple[str, Any], ...]] | None = None
 _ANSWER_RE = re.compile(r"answer\s+is\s*\(?([A-J])\)?\b", re.IGNORECASE)
+JSONL_TAIL_BYTES = 64 * 1024
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -75,12 +79,41 @@ def tee_stdout(log_path: str | Path) -> Iterator[None]:
 def append_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
     """Append records and force them to stable storage."""
     path = Path(path)
+    _reject_symlink_components(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as output:
+    needs_separator = False
+    with path.open("a+b") as output:
+        output.seek(0, os.SEEK_END)
+        file_size = output.tell()
+        tail_size = min(file_size, JSONL_TAIL_BYTES)
+        if tail_size:
+            output.seek(file_size - tail_size)
+            data = output.read(tail_size)
+            last_newline = data.rfind(b"\n")
+            if last_newline < 0 and file_size > JSONL_TAIL_BYTES:
+                raise RuntimeError(
+                    "cannot repair JSONL final record within bounded tail window"
+                )
+            trailing = data[last_newline + 1 :]
+            if trailing.strip():
+                try:
+                    json.loads(trailing)
+                except json.JSONDecodeError:
+                    output.truncate(file_size - tail_size + max(0, last_newline + 1))
+                else:
+                    needs_separator = True
+            elif last_newline >= 0 and last_newline + 1 < len(data):
+                output.truncate(file_size - tail_size + last_newline + 1)
+        output.seek(0, os.SEEK_END)
+        if needs_separator:
+            output.write(b"\n")
         for record in records:
-            output.write(json.dumps(record, ensure_ascii=False) + "\n")
-            output.flush()
-            os.fsync(output.fileno())
+            output.write(
+                (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+            )
+        output.flush()
+        os.fsync(output.fileno())
+    _fsync_directory(path.parent)
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -125,17 +158,44 @@ def require_complete(
 
 def write_json_atomic(path: str | Path, obj) -> None:
     path = Path(path)
+    _reject_symlink_components(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
     try:
-        with temporary.open("w", encoding="utf-8") as output:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(obj, output, ensure_ascii=False)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        temporary.unlink(missing_ok=True)
+
+
+def _reject_symlink_components(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path.cwd()
+    for component in path.parts[1:] if path.is_absolute() else path.parts:
+        current /= component
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            raise ValueError(
+                f"refusing symlinked persistence path component: {current}"
+            )
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def read_json(path: str | Path, default=None):
@@ -159,14 +219,50 @@ def write_manifest(path: str | Path, config: dict[str, Any]) -> None:
     write_json_atomic(path, {"config_sha256": _config_sha256(config), "config": config})
 
 
-def verify_manifest(path: str | Path, config: dict[str, Any]) -> None:
+def _checkpoint_has_rows(paths: Iterable[str | Path]) -> bool:
+    return any(Path(path).exists() and Path(path).stat().st_size > 0 for path in paths)
+
+
+def verify_manifest(
+    path: str | Path,
+    config: dict[str, Any],
+    *,
+    checkpoint_paths: Iterable[str | Path] = (),
+) -> None:
     manifest = read_json(path)
     if manifest is None:
+        if _checkpoint_has_rows(checkpoint_paths):
+            raise RuntimeError(
+                "missing checkpoint manifest; refusing to resume nonempty checkpoint"
+            )
         return
     if manifest.get("config_sha256") != _config_sha256(config):
         raise RuntimeError(
             "stale checkpoint manifest; move stale checkpoints before continuing"
         )
+
+
+def prepare_checkpoint_manifest(
+    path: str | Path,
+    config: dict[str, Any],
+    *,
+    checkpoint_paths: Iterable[str | Path] = (),
+) -> None:
+    """Bind a checkpoint's rows to its configuration before generation starts.
+
+    A missing manifest is valid only when every checkpoint row file is empty or
+    absent.  This lets a clean run create its manifest atomically while making
+    an otherwise ambiguous resume fail closed.
+    """
+    checkpoint_paths = tuple(checkpoint_paths)
+    if read_json(path) is None:
+        if _checkpoint_has_rows(checkpoint_paths):
+            raise RuntimeError(
+                "missing checkpoint manifest; refusing to resume nonempty checkpoint"
+            )
+        write_manifest(path, config)
+        return
+    verify_manifest(path, config, checkpoint_paths=checkpoint_paths)
 
 
 def condition_id(*parts: Any) -> str:
@@ -408,6 +504,7 @@ __all__ = [
     "DirectionRecord",
     "GenerateResult",
     "SteeringSpec",
+    "JSONL_TAIL_BYTES",
     "append_jsonl",
     "build_dim_directions",
     "capture_prompt_hiddens",
@@ -419,6 +516,7 @@ __all__ = [
     "missing_ids",
     "mmlu_prompt",
     "parse_answer_letter",
+    "prepare_checkpoint_manifest",
     "read_json",
     "read_jsonl",
     "save_directions",
