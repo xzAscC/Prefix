@@ -116,26 +116,31 @@ def append_jsonl(path: str | Path, records: list[dict[str, Any]]) -> None:
     _fsync_directory(path.parent)
 
 
-def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+def _iter_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
     path = Path(path)
     if not path.exists():
-        return []
+        return
     with path.open(encoding="utf-8") as input_file:
-        lines = input_file.readlines()
-    records: list[dict[str, Any]] = []
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            if index == len(lines) - 1:
-                break
-            raise
-        if not isinstance(record, dict):
-            raise ValueError("JSONL records must be objects")
-        records.append(record)
-    return records
+        lines = iter(input_file)
+        while True:
+            line = next(lines, None)
+            if line is None:
+                return
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                if next(lines, None) is None:
+                    return
+                raise
+            if not isinstance(record, dict):
+                raise ValueError("JSONL records must be objects")
+            yield record
+
+
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    return list(_iter_jsonl(path))
 
 
 def completed_ids(path: str | Path, id_key: str = "id") -> set[str]:

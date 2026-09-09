@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,78 @@ def test_jsonl_resume_and_atomic_json(tmp_path: Path) -> None:
     runner.write_json_atomic(atomic, {"ok": True})
     assert runner.read_json(atomic) == {"ok": True}
     assert runner.read_json(tmp_path / "missing.json", default=[]) == []
+
+
+def test_iter_jsonl_is_lazy_and_reads_one_line_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_text('{"id": "a"}\n{"id": "b"}\n', encoding="utf-8")
+    original_open = Path.open
+    yielded = 0
+
+    class ReadSpy:
+        def __init__(self, file_object: Any) -> None:
+            self.file_object = file_object
+
+        def __enter__(self) -> "ReadSpy":
+            self.file_object.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self.file_object.__exit__(*args)
+
+        def __iter__(self):
+            nonlocal yielded
+            for line in self.file_object:
+                yielded += 1
+                yield line
+
+        def readlines(self, *args: Any, **kwargs: Any) -> list[str]:
+            raise AssertionError("JSONL reader must not materialize all lines")
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.file_object, name)
+
+    def open_with_spy(self: Path, *args: Any, **kwargs: Any) -> ReadSpy:
+        return ReadSpy(original_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", open_with_spy)
+    records = runner._iter_jsonl(path)
+    assert isinstance(records, Iterator)
+    assert yielded == 0
+    assert next(records) == {"id": "a"}
+    assert yielded == 1
+    assert list(records) == [{"id": "b"}]
+    assert yielded == 2
+
+
+def test_iter_jsonl_missing_file_is_empty(tmp_path: Path) -> None:
+    assert list(runner._iter_jsonl(tmp_path / "missing.jsonl")) == []
+
+
+def test_iter_jsonl_skips_blank_lines_and_requires_objects(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_text('\n  \n{"id": "a"}\n[]\n', encoding="utf-8")
+    records = runner._iter_jsonl(path)
+    assert next(records) == {"id": "a"}
+    with pytest.raises(ValueError, match="records must be objects"):
+        next(records)
+
+
+def test_iter_jsonl_raises_for_malformed_non_final_line(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_text('{"id": "a"}\n{"id":\n{"id": "b"}\n', encoding="utf-8")
+    records = runner._iter_jsonl(path)
+    assert next(records) == {"id": "a"}
+    with pytest.raises(json.JSONDecodeError):
+        next(records)
+
+
+def test_iter_jsonl_ignores_malformed_final_line(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_text('{"id": "a"}\n{"id":', encoding="utf-8")
+    assert list(runner._iter_jsonl(path)) == [{"id": "a"}]
 
 
 @pytest.mark.parametrize("operation", ["append", "atomic"])
