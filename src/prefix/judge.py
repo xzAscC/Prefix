@@ -57,6 +57,14 @@ class JudgeBlocked(RuntimeError):
     """The provider refused the prompt itself (prompt-level safety block)."""
 
 
+class JudgeParseError(RuntimeError):
+    """The provider returned text that could not satisfy the judge rubric."""
+
+
+class JudgeRetryableError(RuntimeError):
+    """The provider request or response failed and scoring should be retried."""
+
+
 _LABEL_RE = re.compile(
     r"^[ \t`*_>#-]*LABEL\s*:\s*(SAFE|UNSAFE)[ \t`*_>#-]*$", re.IGNORECASE
 )
@@ -121,7 +129,12 @@ class GeminiJudge:
     def _access_token(self) -> str:
         now = time.monotonic()
         if self._token is None or now >= self._token_expires_at:
-            self._token = self._token_provider()
+            try:
+                self._token = self._token_provider()
+            except Exception as error:
+                raise JudgeRetryableError(
+                    "Gemini authentication token provider failed"
+                ) from error
             self._token_expires_at = now + 50 * 60
         return self._token
 
@@ -173,15 +186,19 @@ class GeminiJudge:
                 time.sleep(2**attempt)
                 continue
             if status in _RETRYABLE_STATUSES:
-                last_error = RuntimeError(f"retryable HTTP status {status}")
+                last_error = JudgeRetryableError(f"retryable HTTP status {status}")
                 if attempt == 2:
                     break
                 time.sleep(2**attempt)
                 continue
             if status < 200 or status >= 300:
-                raise RuntimeError(f"Gemini request failed with HTTP status {status}")
+                raise JudgeRetryableError(
+                    f"Gemini request failed with HTTP status {status}"
+                )
             return self._response_text(payload)
-        raise RuntimeError("Gemini request failed after 3 attempts") from last_error
+        raise JudgeRetryableError(
+            "Gemini request failed after 3 attempts"
+        ) from last_error
 
     @staticmethod
     def _response_text(payload: dict[str, Any]) -> str:
@@ -192,7 +209,7 @@ class GeminiJudge:
             parts = payload["candidates"][0]["content"]["parts"]
             return "".join(part["text"] for part in parts)
         except (KeyError, IndexError, TypeError) as error:
-            raise RuntimeError(
+            raise JudgeRetryableError(
                 "Gemini response did not contain candidate text"
             ) from error
 
@@ -239,7 +256,7 @@ class GeminiJudge:
         )
         result = self._last_label(self._call(retry_prompt))
         if result is None:
-            raise RuntimeError("Gemini safety judge returned an unparseable label")
+            raise JudgeParseError("Gemini safety judge returned an unparseable label")
         return result
 
     def judge_math(self, response: str, expected_answer: str) -> dict[str, bool]:
@@ -253,5 +270,7 @@ class GeminiJudge:
         )
         result = self._last_json(self._call(retry_prompt))
         if result is None:
-            raise RuntimeError("Gemini math judge returned an unparseable JSON result")
+            raise JudgeParseError(
+                "Gemini math judge returned an unparseable JSON result"
+            )
         return result
