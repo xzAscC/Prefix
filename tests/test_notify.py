@@ -26,7 +26,7 @@ def fake_smtp(monkeypatch: pytest.MonkeyPatch) -> type:
         def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
             self.host = host
             self.port = port
-            self.ops: list[tuple] = []
+            self.ops: list[tuple[object, ...]] = []
             self.sent: list[object] = []
             instances.append(self)
 
@@ -49,7 +49,7 @@ def fake_smtp(monkeypatch: pytest.MonkeyPatch) -> type:
             self.ops.append(("quit",))
 
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
-    FakeSMTP.instances = instances  # type: ignore[attr-defined]
+    setattr(FakeSMTP, "instances", instances)
     return FakeSMTP
 
 
@@ -241,3 +241,47 @@ def test_notify_on_exit_hostname_in_body(
     (inst,) = fake_smtp.instances  # type: ignore[attr-defined]
     (msg,) = inst.sent
     assert socket.gethostname() in msg.get_content()
+
+
+def test_notify_on_exit_disabled_sends_no_email_and_reraises(
+    fake_smtp: type,
+) -> None:
+    with notify.notify_on_exit("child", enabled=False):
+        pass
+    with pytest.raises(RuntimeError, match="boom"):
+        with notify.notify_on_exit("child", enabled=False):
+            raise RuntimeError("boom")
+    assert fake_smtp.instances == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("event", ["completed", "decision_required"])
+def test_send_batch_notification_sends_one_neutral_event_email(
+    fake_smtp: type, monkeypatch: pytest.MonkeyPatch, event: str
+) -> None:
+    _set_creds(monkeypatch)
+    notify.send_batch_notification("no-steering batch", event)
+    (inst,) = fake_smtp.instances  # type: ignore[attr-defined]
+    (msg,) = inst.sent
+    assert len(inst.sent) == 1
+    assert event in msg["Subject"]
+    assert "no-steering batch" in msg.get_content()
+
+
+def test_send_batch_notification_invalid_event_sends_no_email(
+    fake_smtp: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_creds(monkeypatch)
+    with pytest.raises(ValueError, match="completed"):
+        notify.send_batch_notification("batch", "failed")
+    assert fake_smtp.instances == []  # type: ignore[attr-defined]
+
+
+def test_send_batch_notification_failure_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        notify,
+        "send_email",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("smtp down")),
+    )
+    notify.send_batch_notification("batch", "completed")
