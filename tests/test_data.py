@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -67,6 +68,64 @@ def test_load_harmbench_rejects_unexpected_count(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="expected 400"):
         data.load_harmbench(tmp_path, fetch=lambda _: _harmbench_csv(399))
+
+
+def test_validate_offline_dataset_caches_checks_all_exact_scopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str, Path | None]] = []
+    digest = hashlib.sha256(data.HARMBENCH_URL.encode("utf-8")).hexdigest()
+    (tmp_path / f"harmbench_{digest}.json").write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(
+        data,
+        "load_harmbench",
+        lambda cache_dir=None, fetch=None: (
+            calls.append(("harmbench", "all", cache_dir)) or [{}] * 400
+        ),
+    )
+    monkeypatch.setattr(
+        data,
+        "load_mmlu_pro",
+        lambda split, cache_dir=None, loader=None: (
+            calls.append(("mmlu_pro", split, cache_dir)) or [{}] * 12032
+        ),
+    )
+    monkeypatch.setattr(
+        data,
+        "load_math500",
+        lambda cache_dir=None, loader=None: (
+            calls.append(("math500", "test", cache_dir)) or [{}] * 500
+        ),
+    )
+
+    assert data.validate_offline_dataset_caches(tmp_path) == {
+        "harmbench": 400,
+        "mmlu_pro": 12032,
+        "math500": 500,
+    }
+    assert calls == [
+        ("harmbench", "all", tmp_path),
+        ("mmlu_pro", "test", tmp_path),
+        ("math500", "test", tmp_path),
+    ]
+
+
+def test_validate_offline_dataset_caches_does_not_fetch_harmbench(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(data, "load_mmlu_pro", lambda *args, **kwargs: [{}] * 12032)
+    monkeypatch.setattr(data, "load_math500", lambda *args, **kwargs: [{}] * 500)
+    monkeypatch.setattr(
+        data,
+        "load_harmbench",
+        lambda cache_dir=None, fetch=None: (_ for _ in ()).throw(
+            AssertionError("cache-only validation must not fetch")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="harmbench"):
+        data.validate_offline_dataset_caches(tmp_path)
 
 
 def test_harmbench_split_is_reproducible_sorted_and_disjoint() -> None:

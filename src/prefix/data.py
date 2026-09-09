@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import random
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -28,7 +29,11 @@ _ANSWER_LETTERS = "ABCDEFGHIJ"
 
 
 def _default_cache_dir(cache_dir: Path | None) -> Path:
-    directory = cache_dir if cache_dir is not None else Path("data")
+    directory = (
+        cache_dir
+        if cache_dir is not None
+        else Path(os.environ.get("PREFIX_DATA_CACHE", "data"))
+    )
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -74,6 +79,36 @@ def load_harmbench(
     records.sort(key=lambda record: (record["category"], record["behavior"]))
     cache_path.write_text(json.dumps(records), encoding="utf-8")
     return records
+
+
+def validate_offline_dataset_caches(cache_dir: Path) -> dict[str, int]:
+    """Load every configured benchmark from an existing cache only.
+
+    The caller supplies the shared cache root used by the SDSC jobs.  The
+    HarmBench file is checked before loading so its URL fallback can never be
+    reached by this gate; Hugging Face datasets obey the offline environment
+    variables while resolving their cached revisions.
+    """
+    cache_dir = Path(cache_dir)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["HF_DATASETS_OFFLINE"] = "1"
+    harmbench_digest = hashlib.sha256(HARMBENCH_URL.encode("utf-8")).hexdigest()
+    harmbench_cache = cache_dir / f"harmbench_{harmbench_digest}.json"
+    if not harmbench_cache.is_file():
+        raise ValueError(f"harmbench cache is missing: {harmbench_cache}")
+
+    counts = {
+        "harmbench": len(load_harmbench(cache_dir)),
+        "mmlu_pro": len(load_mmlu_pro("test", cache_dir=cache_dir)),
+        "math500": len(load_math500(cache_dir=cache_dir)),
+    }
+    expected = {"harmbench": 400, "mmlu_pro": 12032, "math500": 500}
+    for name, expected_count in expected.items():
+        if counts[name] != expected_count:
+            raise ValueError(
+                f"{name} cache has {counts[name]} rows, expected {expected_count}"
+            )
+    return counts
 
 
 def harmbench_split(n_val: int = 50, seed: int = 42) -> tuple[list[int], list[int]]:
