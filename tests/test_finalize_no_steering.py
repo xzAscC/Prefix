@@ -447,6 +447,73 @@ def test_validate_scoring_rejects_cross_run_response_root(
         module.validate_scoring(scoring, generation_checkpoint_root=generation_a)
 
 
+def test_validate_scoring_hashes_response_file_in_bounded_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _generation_a, generation_b, scoring, _manifest = _bound_scoring_fixture(
+        tmp_path
+    )
+    response = (
+        generation_b
+        / module.model_spec("Qwen/Qwen3-4B").slug
+        / "mmlu_pro"
+        / "responses.jsonl"
+    )
+    real_open = Path.open
+    read_sizes: list[int] = []
+
+    class TrackingReader:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self.handle.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return self.handle.read(size)
+
+    def tracking_open(path: Path, mode: str = "r", *args, **kwargs):
+        handle = real_open(path, mode, *args, **kwargs)
+        if path == response and "b" in mode:
+            return TrackingReader(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    assert module.validate_scoring(scoring, generation_checkpoint_root=generation_b)
+    assert read_sizes
+    assert all(0 < size <= 1024 * 1024 for size in read_sizes)
+
+
+def test_validate_scoring_collects_response_ids_without_materializing_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _generation_a, generation_b, scoring, _manifest = _bound_scoring_fixture(
+        tmp_path
+    )
+    response = (
+        generation_b
+        / module.model_spec("Qwen/Qwen3-4B").slug
+        / "mmlu_pro"
+        / "responses.jsonl"
+    )
+    real_read_jsonl = module._read_jsonl
+
+    def reject_response_materialization(path: Path):
+        if path == response:
+            raise AssertionError("response rows must be iterated line by line")
+        return real_read_jsonl(path)
+
+    monkeypatch.setattr(module, "_read_jsonl", reject_response_materialization)
+
+    assert module.validate_scoring(scoring, generation_checkpoint_root=generation_b)
+
+
 def test_validate_scoring_rejects_changed_bound_response_path(
     tmp_path: Path,
 ) -> None:

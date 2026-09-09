@@ -16,7 +16,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, TextIO, cast
 
@@ -26,6 +26,7 @@ from prefix.notify import send_batch_notification
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+HASH_CHUNK_SIZE = 1024 * 1024
 
 
 def _load_script(name: str) -> Any:
@@ -90,21 +91,34 @@ def validate_generation(generation_root: str | Path) -> dict[str, int]:
     return {"models": len(MODEL_MATRIX), "records": total}
 
 
-def _read_jsonl(path: Path) -> list[dict[str, object]]:
+def _iter_jsonl(path: Path) -> Iterator[dict[str, object]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open(encoding="utf-8")
     except FileNotFoundError:
         raise FileNotFoundError(f"missing score output: {path}") from None
-    rows: list[dict[str, object]] = []
-    for line_number, line in enumerate(lines, 1):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"invalid score JSON at {path}:{line_number}") from error
-        if not isinstance(row, dict):
-            raise ValueError(f"score row must be an object at {path}:{line_number}")
-        rows.append(cast(dict[str, object], row))
-    return rows
+    with handle:
+        for line_number, line in enumerate(handle, 1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"invalid score JSON at {path}:{line_number}"
+                ) from error
+            if not isinstance(row, dict):
+                raise ValueError(f"score row must be an object at {path}:{line_number}")
+            yield cast(dict[str, object], row)
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    return list(_iter_jsonl(path))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def validate_scoring(
@@ -204,11 +218,10 @@ def validate_scoring(
                 raise ValueError(f"response path is not canonical for {benchmark}")
             if not response_path.exists():
                 raise ValueError(f"missing bound response file for {benchmark}")
-            digest = hashlib.sha256(response_path.read_bytes()).hexdigest()
+            digest = _sha256_file(response_path)
             if digest != bound["content_sha256"]:
                 raise ValueError(f"response content digest mismatch for {benchmark}")
-            response_rows = _read_jsonl(response_path)
-            response_ids = {str(row.get("id")) for row in response_rows}
+            response_ids = {str(row.get("id")) for row in _iter_jsonl(response_path)}
             if response_ids != {str(value) for value in bound["ids"]}:
                 raise ValueError(f"response ids do not match manifest for {benchmark}")
             if identifiers != {str(value) for value in bound["ids"]}:
