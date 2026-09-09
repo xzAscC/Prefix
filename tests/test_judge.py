@@ -13,6 +13,8 @@ import pytest
 judge_module = importlib.import_module("prefix.judge")
 GeminiJudge = judge_module.GeminiJudge
 JudgeBlocked = judge_module.JudgeBlocked
+JudgeParseError = judge_module.JudgeParseError
+JudgeRetryableError = judge_module.JudgeRetryableError
 judge_batch = judge_module.judge_batch
 
 
@@ -93,6 +95,17 @@ def test_unparseable_safety_answer_is_reasked() -> None:
     )
 
 
+def test_unparseable_safety_answer_has_explicit_parse_exception() -> None:
+    transport = FakeTransport(
+        [(200, _response("unclear")), (200, _response("still unclear"))]
+    )
+
+    with pytest.raises(
+        JudgeParseError, match="Gemini safety judge returned an unparseable label"
+    ):
+        _judge(transport).judge_safety("request", "response")
+
+
 def test_retryable_statuses_and_exceptions_back_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,6 +126,32 @@ def test_retry_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(RuntimeError, match="failed after 3 attempts"):
         _judge(transport).judge_safety("request", "response")
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_provider_http_failures_are_retryable(status: int) -> None:
+    with pytest.raises(
+        JudgeRetryableError,
+        match=f"Gemini request failed with HTTP status {status}",
+    ):
+        _judge(FakeTransport([(status, {})])).judge_safety("request", "response")
+
+
+def test_missing_provider_candidate_is_retryable() -> None:
+    with pytest.raises(
+        JudgeRetryableError, match="Gemini response did not contain candidate text"
+    ):
+        _judge(FakeTransport([(200, {})])).judge_safety("request", "response")
+
+
+def test_auth_token_provider_failure_is_retryable() -> None:
+    def failing_provider() -> str:
+        raise ValueError("credentials expired")
+
+    with pytest.raises(
+        JudgeRetryableError, match="Gemini authentication token provider failed"
+    ):
+        _judge(FakeTransport([]), failing_provider).judge_safety("request", "response")
 
 
 def test_math_json_parsing() -> None:
@@ -155,6 +194,17 @@ def test_unparseable_math_answer_is_reasked() -> None:
         "answer_correct": False,
     }
     assert len(transport.calls) == 2
+
+
+def test_unparseable_math_answer_has_explicit_parse_exception() -> None:
+    transport = FakeTransport(
+        [(200, _response("not json")), (200, _response("still not json"))]
+    )
+
+    with pytest.raises(
+        JudgeParseError, match="Gemini math judge returned an unparseable JSON result"
+    ):
+        _judge(transport).judge_math("answer", "expected")
 
 
 def test_token_provider_is_cached_across_judgments() -> None:
