@@ -4,6 +4,8 @@
 #SBATCH --partition=nairr-gpu-shared
 #SBATCH --qos=nairr-gpu-shared-normal
 #SBATCH --gpus=1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --time=08:00:00
 #SBATCH --requeue
 #SBATCH --cpus-per-task=8

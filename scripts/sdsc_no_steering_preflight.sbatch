@@ -4,6 +4,8 @@
 #SBATCH --partition=nairr-gpu-shared
 #SBATCH --qos=nairr-gpu-shared-normal
 #SBATCH --gpus=1
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
 #SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --output=logs/sdsc_no_steering_preflight_%j.log
