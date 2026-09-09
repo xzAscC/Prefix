@@ -1,0 +1,41 @@
+name: no_steering
+steering: false
+quantization: false
+models:
+  - id: Qwen/Qwen3-4B
+    revision: 1cfa9a7208912126459214e8b04321603b3df60c
+    slug: Qwen--Qwen3-4B
+    steering: false
+    quantization: null
+  - id: Qwen/Qwen3-14B
+    revision: 40c069824f4251a91eefaf281ebe4c544efd3e18
+    slug: Qwen--Qwen3-14B
+    steering: false
+    quantization: null
+  - id: allenai/Olmo-3-7B-Think
+    revision: d97e442d7cc678210054dbcc9b440894d62c89a4
+    slug: allenai--Olmo-3-7B-Think
+    steering: false
+    quantization: null
+  - id: allenai/Olmo-3-32B-Think
+    revision: f2edda15216e738ef2bb73771e11890e152b2112
+    slug: allenai--Olmo-3-32B-Think
+    steering: false
+    quantization: null
+datasets:
+  harmbench:
+    split: all
+    count: 400
+  mmlu_pro:
+    split: test
+    count: 12032
+  math500:
+    split: test
+    count: 500
+evaluation:
+  response_only_conditional_ppl: true
+  skip_completed_ids: true
+  isolate_sample_failures: true
+judge:
+  harmbench_gemini_scoring: noncanonical
+  model: gemini-3.5-flash-lite
