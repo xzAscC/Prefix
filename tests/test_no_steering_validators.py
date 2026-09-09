@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import math
+import shutil
 from pathlib import Path
 from types import ModuleType
 from collections.abc import Mapping
@@ -254,6 +255,102 @@ def test_formal_validator_accepts_model_scoped_roots_with_aggregate_manifest_roo
             "Qwen/Qwen3-4B",
         ]
     )
+
+
+def test_formal_validator_accepts_identical_tree_copied_to_local_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path / "remote", monkeypatch)
+    local = tmp_path / "local-run"
+    local_checkpoint = local / "checkpoints" / checkpoint.name
+    local_result = local / "results" / result.name
+    shutil.copytree(checkpoint, local_checkpoint)
+    shutil.copytree(result, local_result)
+
+    formal.main(
+        [
+            "--result-root",
+            str(local_result),
+            "--checkpoint-root",
+            str(local_checkpoint),
+            "--model-id",
+            "Qwen/Qwen3-4B",
+        ]
+    )
+
+
+@pytest.mark.parametrize("container", ["artifacts", "outputs"])
+def test_formal_validator_rejects_relocated_root_with_wrong_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, container: str
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path / "remote", monkeypatch)
+    local = tmp_path / "local-run"
+    local_checkpoint = local / container / checkpoint.name
+    local_result = local / "results" / result.name
+    shutil.copytree(checkpoint, local_checkpoint)
+    shutil.copytree(result, local_result)
+
+    with pytest.raises(ValueError, match="checkpoint root"):
+        formal.main(
+            [
+                "--result-root",
+                str(local_result),
+                "--checkpoint-root",
+                str(local_checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )
+
+
+def test_formal_validator_rejects_relocated_root_with_wrong_slug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path / "remote", monkeypatch)
+    local = tmp_path / "local-run"
+    local_checkpoint = local / "checkpoints" / "not-the-model"
+    local_result = local / "results" / result.name
+    shutil.copytree(checkpoint, local_checkpoint)
+    shutil.copytree(result, local_result)
+
+    with pytest.raises(ValueError, match="model-scoped"):
+        formal.main(
+            [
+                "--result-root",
+                str(local_result),
+                "--checkpoint-root",
+                str(local_checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )
+
+
+def test_formal_validator_rejects_ids_changed_in_relocated_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path / "remote", monkeypatch)
+    local = tmp_path / "local-run"
+    local_checkpoint = local / "checkpoints" / checkpoint.name
+    local_result = local / "results" / result.name
+    shutil.copytree(checkpoint, local_checkpoint)
+    shutil.copytree(result, local_result)
+    response_path = local_checkpoint / "mmlu_pro" / "responses.jsonl"
+    response = json.loads(response_path.read_text().strip())
+    response["id"] = "changed-id"
+    response_path.write_text(json.dumps(response) + "\n")
+
+    with pytest.raises(ValueError, match="ids mismatch"):
+        formal.main(
+            [
+                "--result-root",
+                str(local_result),
+                "--checkpoint-root",
+                str(local_checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )
 
 
 def test_formal_validator_rejects_wrong_manifest_digest(

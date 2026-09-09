@@ -49,10 +49,21 @@ def _expected_sampling(revision: str) -> dict[str, object]:
     }
 
 
-def _root_matches(declared: object, supplied: Path, model_slug: str) -> bool:
+def _root_matches(
+    declared: object,
+    supplied: Path,
+    model_slug: str,
+    container_name: str,
+) -> bool:
     declared_path = Path(str(declared)).resolve()
     supplied_path = supplied.resolve()
-    return declared_path == supplied_path or declared_path / model_slug == supplied_path
+    if declared_path == supplied_path:
+        return True
+    return (
+        declared_path.name == container_name
+        and supplied_path.parent.name == container_name
+        and supplied_path.name == model_slug
+    )
 
 
 def _validate_response_root(
@@ -207,9 +218,11 @@ def main(argv: list[str] | None = None) -> None:
     output_roots = config.get("output_roots")
     if not isinstance(output_roots, dict):
         raise ValueError("formal checkpoint manifest lacks output roots")
-    if not _root_matches(output_roots.get("checkpoint"), checkpoint_root, spec.slug):
+    if not _root_matches(
+        output_roots.get("checkpoint"), checkpoint_root, spec.slug, "checkpoints"
+    ):
         raise ValueError("formal checkpoint manifest checkpoint root mismatch")
-    if not _root_matches(output_roots.get("output"), result_root, spec.slug):
+    if not _root_matches(output_roots.get("output"), result_root, spec.slug, "results"):
         raise ValueError("formal checkpoint manifest result root mismatch")
 
     expected = {
