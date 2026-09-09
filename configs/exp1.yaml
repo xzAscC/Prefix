@@ -1,0 +1,26 @@
+# Experiment 1: safety direction construction + alignment-behavior analysis
+model:
+  id: Qwen/Qwen3-4B
+  layer: 20
+  gpu_memory_utilization: 0.8
+  max_model_len: 8192
+direction:
+  pos_dataset: LLM-LAT/benign-dataset
+  neg_dataset: LLM-LAT/harmful-dataset
+  n_per_class: 100
+  position: last_prompt_token
+  method: dim
+generation:
+  dataset: harmbench
+  n_prompts: 400
+  max_new_tokens: 512
+  temperature: 0.0
+  enable_thinking: false
+judge:
+  model: gemini-3.7-flash
+  region: global
+  temperature: 0.0
+analysis:
+  n_bins: 10
+  early_tokens: [1, 2, 3, 4, 5]
+seed: 42

@@ -1,0 +1,25 @@
+# Experiment 2: controlled full-steering sweep (safety-capability trade-off)
+model:
+  id: Qwen/Qwen3-4B
+  layer: 20
+  gpu_memory_utilization: 0.8
+  max_model_len: 12288
+steering:
+  schedule: full
+  alphas: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0]
+  strength: alpha_times_mean_norm
+harmbench:
+  n_prompts: 400
+  max_new_tokens: 512
+  temperature: 0.0
+  enable_thinking: false
+mmlu:
+  source: test
+  n: 500
+  max_new_tokens: 4096
+  temperature: 0.0
+  enable_thinking: true
+judge:
+  model: gemini-3.7-flash
+  region: global
+seed: 42

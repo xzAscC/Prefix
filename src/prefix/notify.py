@@ -32,6 +32,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Literal
+
+from . import env
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -39,26 +42,11 @@ SMTP_TIMEOUT = 30
 
 
 def _dotenv_path() -> Path:
-    return Path(__file__).resolve().parents[2] / ".env"
+    return env.dotenv_path()
 
 
 def _load_dotenv(path: Path | None = None) -> dict[str, str]:
-    """Parse a ``KEY=VALUE`` file; ignores comments, blanks, quoted values."""
-    path = path if path is not None else _dotenv_path()
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return values
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip().strip("'\"")
-        if key:
-            values[key] = value
-    return values
+    return env.load_dotenv(path if path is not None else _dotenv_path())
 
 
 def _ensure_env() -> None:
@@ -104,12 +92,29 @@ def send_email(subject: str, body: str, *, to: list[str] | None = None) -> None:
         server.send_message(msg)
 
 
-def _try_send(subject: str, body: str) -> None:
+def _try_send(subject: str, body: str) -> bool:
     try:
         send_email(subject, body)
         print(f"[notify] sent: {subject}", file=sys.stderr)
+        return True
     except Exception as exc:  # notification must never kill the run
         print(f"[notify] FAILED to send '{subject}': {exc}", file=sys.stderr)
+        return False
+
+
+def send_batch_notification(
+    task: str,
+    event: Literal["completed", "decision_required"] | str,
+    *,
+    details: str | None = None,
+) -> bool:
+    """Best-effort notification for an explicitly reported batch event."""
+    if event not in {"completed", "decision_required"}:
+        raise ValueError("event must be 'completed' or 'decision_required'")
+    body = [f"task: {task}", f"event: {event}"]
+    if details:
+        body += ["", details]
+    return _try_send(f"[Prefix] {event}: {task}", "\n".join(body))
 
 
 def _tail(path: str | Path, lines: int) -> str:
@@ -126,13 +131,21 @@ def notify_on_exit(
     *,
     log_file: str | Path | None = None,
     tail_lines: int = 40,
+    enabled: bool = True,
 ) -> Iterator[None]:
     """Email ``task`` success/failure when the wrapped block exits.
+
+    Set ``enabled=False`` to retain the context-manager boundary without sending
+    an automatic notification.
 
     On exception the traceback (plus the tail of ``log_file`` when given) is
     emailed and the exception re-raised. On success a short summary email is
     sent. Notification failures are swallowed with a stderr warning.
     """
+    if not enabled:
+        yield
+        return
+
     start = time.monotonic()
     host = socket.gethostname()
     try:
@@ -168,4 +181,4 @@ def notify_on_exit(
         _try_send(f"[Prefix] done: {task}", "\n".join(body))
 
 
-__all__ = ["configured", "notify_on_exit", "send_email"]
+__all__ = ["configured", "notify_on_exit", "send_batch_notification", "send_email"]
