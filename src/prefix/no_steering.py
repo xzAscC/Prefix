@@ -151,14 +151,18 @@ def _selected_logprobs(sample: Mapping[str, object]) -> list[float]:
     return result
 
 
-def conditional_ppl(samples: Iterable[Mapping[str, object]]) -> float:
-    """Compute response-only PPL as ``exp(total NLL / selected token count)``."""
-    total_nll = 0.0
-    token_count = 0
-    for sample in samples:
-        logprobs = _selected_logprobs(sample)
-        total_nll -= sum(logprobs)
-        token_count += len(logprobs)
+def _accumulate_ppl(
+    total_nll: float,
+    token_count: int,
+    sample: Mapping[str, object],
+) -> tuple[float, int]:
+    logprobs = _selected_logprobs(sample)
+    total_nll -= sum(logprobs)
+    token_count += len(logprobs)
+    return total_nll, token_count
+
+
+def _finalize_ppl(total_nll: float, token_count: int) -> float:
     if token_count == 0:
         raise ValueError("conditional PPL requires at least one selected token")
     try:
@@ -168,6 +172,15 @@ def conditional_ppl(samples: Iterable[Mapping[str, object]]) -> float:
     if not math.isfinite(result):
         raise ValueError("conditional PPL is nonfinite")
     return result
+
+
+def conditional_ppl(samples: Iterable[Mapping[str, object]]) -> float:
+    """Compute response-only PPL as ``exp(total NLL / selected token count)``."""
+    total_nll = 0.0
+    token_count = 0
+    for sample in samples:
+        total_nll, token_count = _accumulate_ppl(total_nll, token_count, sample)
+    return _finalize_ppl(total_nll, token_count)
 
 
 Sample = TypeVar("Sample", bound=Mapping[str, object])
