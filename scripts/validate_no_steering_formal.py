@@ -20,16 +20,6 @@ PPL_FIELDS = (
 )
 
 
-def _read_rows(path: Path) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        row = json.loads(line)
-        if not isinstance(row, dict):
-            raise ValueError(f"response row must be an object at {path}")
-        rows.append(cast(dict[str, object], row))
-    return rows
-
-
 def _config_sha256(config: dict[str, object]) -> str:
     encoded = json.dumps(
         config, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -67,62 +57,118 @@ def _root_matches(
 
 
 def _validate_response_root(
-    root: Path, model_id: str, expected: dict[str, int], revision: str
-) -> tuple[dict[str, list[dict[str, object]]], set[str]]:
-    by_benchmark: dict[str, list[dict[str, object]]] = {}
+    root: Path,
+    model_id: str,
+    expected: dict[str, int],
+    revision: str,
+    benchmark_ids: dict[str, object],
+) -> dict[str, float | int]:
     identifiers: set[str] = set()
+    selected_token_count = 0
+    generated_token_count = 0
+    covered_records = 0
+    total_nll = 0.0
     for benchmark, count in expected.items():
         path = root / benchmark / "responses.jsonl"
-        rows = _read_rows(path)
-        if len(rows) != count:
-            raise ValueError(f"formal response coverage is incomplete for {benchmark}")
-        by_benchmark[benchmark] = rows
-        for row in rows:
-            if row.get("status") != "ok" or row.get("model_id") != model_id:
-                raise ValueError("formal response contains an invalid status or model")
-            if row.get("benchmark") != benchmark:
-                raise ValueError("formal response benchmark mismatch")
-            identifier = row.get("id")
-            if (
-                not isinstance(identifier, str)
-                or not identifier
-                or identifier in identifiers
-            ):
-                raise ValueError("formal responses contain missing or duplicate ids")
-            identifiers.add(identifier)
-            metadata = row.get("metadata")
-            provenance = (
-                metadata.get("provenance") if isinstance(metadata, dict) else None
-            )
-            if (
-                not isinstance(provenance, dict)
-                or provenance.get("model_id") != model_id
-            ):
-                raise ValueError("formal response provenance model mismatch")
-            if provenance.get("revision") != revision:
-                raise ValueError("formal response provenance revision mismatch")
-            generated = row.get("generated_token_count")
-            logprobs = row.get("selected_generated_token_logprobs")
-            if (
-                isinstance(generated, bool)
-                or not isinstance(generated, int)
-                or generated <= 0
-                or not isinstance(logprobs, list)
-                or len(logprobs) != generated
-            ):
-                raise ValueError("formal response logprob coverage is invalid")
-            for value in logprobs:
-                if isinstance(value, bool):
-                    raise ValueError("formal response logprob coverage is invalid")
+        declared = benchmark_ids.get(benchmark)
+        declared_ids = (
+            cast(list[object], declared) if isinstance(declared, list) else []
+        )
+        row_count = 0
+        with path.open("r", encoding="utf-8") as response_file:
+            for line in response_file:
+                if not line.strip():
+                    raise ValueError(f"formal response contains a blank line at {path}")
                 try:
-                    number = float(value)
-                except (TypeError, ValueError):
+                    row = json.loads(line)
+                except json.JSONDecodeError:
                     raise ValueError(
-                        "formal response logprob coverage is invalid"
+                        f"formal response contains a malformed line at {path}"
                     ) from None
-                if not math.isfinite(number) or number > 0:
+                if not isinstance(row, dict):
+                    raise ValueError(f"response row must be an object at {path}")
+                if row_count >= count:
+                    raise ValueError(
+                        f"formal response coverage is incomplete for {benchmark}"
+                    )
+                row = cast(dict[str, object], row)
+                if row.get("status") != "ok" or row.get("model_id") != model_id:
+                    raise ValueError(
+                        "formal response contains an invalid status or model"
+                    )
+                if row.get("benchmark") != benchmark:
+                    raise ValueError("formal response benchmark mismatch")
+                identifier = row.get("id")
+                if (
+                    not isinstance(identifier, str)
+                    or not identifier
+                    or identifier in identifiers
+                ):
+                    raise ValueError(
+                        "formal responses contain missing or duplicate ids"
+                    )
+                if (
+                    row_count >= len(declared_ids)
+                    or declared_ids[row_count] != identifier
+                ):
+                    raise ValueError(f"formal checkpoint ids mismatch for {benchmark}")
+                identifiers.add(identifier)
+                metadata = row.get("metadata")
+                provenance = (
+                    metadata.get("provenance") if isinstance(metadata, dict) else None
+                )
+                if (
+                    not isinstance(provenance, dict)
+                    or provenance.get("model_id") != model_id
+                ):
+                    raise ValueError("formal response provenance model mismatch")
+                if provenance.get("revision") != revision:
+                    raise ValueError("formal response provenance revision mismatch")
+                generated = row.get("generated_token_count")
+                logprobs = row.get("selected_generated_token_logprobs")
+                if (
+                    isinstance(generated, bool)
+                    or not isinstance(generated, int)
+                    or generated <= 0
+                    or not isinstance(logprobs, list)
+                    or len(logprobs) != generated
+                ):
                     raise ValueError("formal response logprob coverage is invalid")
-    return by_benchmark, identifiers
+                for value in logprobs:
+                    if isinstance(value, bool):
+                        raise ValueError("formal response logprob coverage is invalid")
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            "formal response logprob coverage is invalid"
+                        ) from None
+                    if not math.isfinite(number) or number > 0:
+                        raise ValueError("formal response logprob coverage is invalid")
+                total_nll -= sum(
+                    float(cast(float | int | str, value)) for value in logprobs
+                )
+                generated_token_count += generated
+                selected_token_count += len(logprobs)
+                if logprobs:
+                    covered_records += 1
+                row_count += 1
+        if row_count != count:
+            raise ValueError(f"formal response coverage is incomplete for {benchmark}")
+        if len(declared_ids) != row_count:
+            raise ValueError(f"formal checkpoint ids mismatch for {benchmark}")
+    if len(identifiers) != sum(expected.values()):
+        raise ValueError("formal checkpoint dataset coverage mismatch")
+    if selected_token_count == 0:
+        raise ValueError("formal PPL has zero selected tokens")
+    return {
+        "ppl": math.exp(total_nll / selected_token_count),
+        "selected_token_count": selected_token_count,
+        "generated_token_count": generated_token_count,
+        "covered_records": covered_records,
+        "total_records": sum(expected.values()),
+        "coverage_ratio": selected_token_count / generated_token_count,
+    }
 
 
 def _number_matches(actual: object, expected: float, field: str) -> None:
@@ -147,33 +193,6 @@ def _validate_ppl_payload(payload: object, expected: dict[str, float | int]) -> 
             _number_matches(actual, expected_value, field)
         elif actual != expected_value or isinstance(actual, bool):
             raise ValueError(f"formal PPL field {field} mismatch")
-
-
-def _recompute_ppl(
-    rows: list[dict[str, object]], total_records: int
-) -> dict[str, float | int]:
-    selected_token_count = 0
-    generated_token_count = 0
-    covered_records = 0
-    total_nll = 0.0
-    for row in rows:
-        values = cast(list[object], row["selected_generated_token_logprobs"])
-        generated_token_count += cast(int, row["generated_token_count"])
-        selected_token_count += len(values)
-        if values:
-            covered_records += 1
-        total_nll -= sum(float(cast(float | int | str, value)) for value in values)
-    if selected_token_count == 0:
-        raise ValueError("formal PPL has zero selected tokens")
-    ppl = math.exp(total_nll / selected_token_count)
-    return {
-        "ppl": ppl,
-        "selected_token_count": selected_token_count,
-        "generated_token_count": generated_token_count,
-        "covered_records": covered_records,
-        "total_records": total_records,
-        "coverage_ratio": selected_token_count / generated_token_count,
-    }
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -248,17 +267,9 @@ def main(argv: list[str] | None = None) -> None:
     if not isinstance(benchmark_ids, dict):
         raise ValueError("formal checkpoint manifest lacks benchmark ids")
 
-    rows_by_benchmark, identifiers = _validate_response_root(
-        checkpoint_root, model_id, expected, spec.revision
+    expected_ppl = _validate_response_root(
+        checkpoint_root, model_id, expected, spec.revision, benchmark_ids
     )
-    all_rows = [row for rows in rows_by_benchmark.values() for row in rows]
-    for benchmark, rows in rows_by_benchmark.items():
-        declared_ids = benchmark_ids.get(benchmark)
-        actual_ids = [cast(str, row["id"]) for row in rows]
-        if declared_ids != actual_ids:
-            raise ValueError(f"formal checkpoint ids mismatch for {benchmark}")
-    if len(identifiers) != sum(expected.values()):
-        raise ValueError("formal checkpoint dataset coverage mismatch")
 
     try:
         summary = json.loads((result_root / "summary.json").read_text(encoding="utf-8"))
@@ -277,7 +288,6 @@ def main(argv: list[str] | None = None) -> None:
         or provenance.get("revision") != spec.revision
     ):
         raise ValueError("formal result summary model mismatch")
-    expected_ppl = _recompute_ppl(all_rows, sum(expected.values()))
     summary_ppl = summary.get("ppl")
     _validate_ppl_payload(summary_ppl, expected_ppl)
     _validate_ppl_payload(conditional, expected_ppl)

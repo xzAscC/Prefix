@@ -257,6 +257,37 @@ def test_formal_validator_accepts_model_scoped_roots_with_aggregate_manifest_roo
     )
 
 
+def test_formal_validator_streams_response_jsonl_without_read_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path, monkeypatch)
+    original_read_text = Path.read_text
+
+    def reject_response_read_text(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if self.name == "responses.jsonl":
+            raise AssertionError("responses.jsonl must be streamed")
+        return original_read_text(
+            self, encoding=encoding, errors=errors, newline=newline
+        )
+
+    monkeypatch.setattr(Path, "read_text", reject_response_read_text)
+    formal.main(
+        [
+            "--result-root",
+            str(result),
+            "--checkpoint-root",
+            str(checkpoint),
+            "--model-id",
+            "Qwen/Qwen3-4B",
+        ]
+    )
+
+
 def test_formal_validator_accepts_identical_tree_copied_to_local_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
