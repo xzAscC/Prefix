@@ -177,6 +177,8 @@ def test_formal_jobs_retain_exact_sds_c_constraints() -> None:
         assert "#SBATCH --partition=nairr-gpu-shared" in text
         assert "#SBATCH --qos=nairr-gpu-shared-normal" in text
         assert "#SBATCH --gpus=1" in text
+        assert text.count("#SBATCH --ntasks=1") == 1
+        assert text.count("#SBATCH --nodes=1") == 1
         assert "--gres" not in text
 
 
