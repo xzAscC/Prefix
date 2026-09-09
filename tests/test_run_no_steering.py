@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -1124,6 +1125,206 @@ def test_score_retry_restoration_uses_membership_set_and_preserves_order(
     ]
 
 
+def test_non_ok_retry_response_replaces_existing_row_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    output = tmp_path / "non-ok-retry.jsonl"
+    runner.append_jsonl(
+        output,
+        [{"id": "x", "status": "error", "error": "HTTP 503", "retryable": True}],
+    )
+    response = {
+        "id": "x",
+        "benchmark": "math500",
+        "status": "error",
+        "error": "generation failed",
+        "gold": "42",
+    }
+
+    class ExplodingJudge:
+        def judge_math(self, response: str, expected: str) -> dict[str, bool]:
+            raise AssertionError("non-OK response must not call judge")
+
+    written = runner.score_responses(
+        [response], output_path=output, judge=ExplodingJudge()
+    )
+    saved = runner.read_jsonl(output)
+    assert [row["id"] for row in saved] == ["x"]
+    assert saved[0]["status"] == "error"
+    assert saved[0]["error"] == "generation failed"
+    assert written == saved
+
+    assert (
+        runner.score_responses([response], output_path=output, judge=ExplodingJudge())
+        == []
+    )
+    assert runner.read_jsonl(output) == saved
+
+
+def test_mixed_incomplete_ppl_defers_complete_invalid_validation(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=checkpoint)[
+        "responses"
+    ]
+    runner.append_jsonl(
+        response_path,
+        [
+            {
+                "id": "complete-invalid",
+                "benchmark": "mmlu_pro",
+                "gold": "A",
+                "extracted_answer": "A",
+                "status": "ok",
+                "generated_token_count": 1,
+                "selected_generated_token_logprobs": [None],
+            },
+            {
+                "id": "global-error",
+                "benchmark": "mmlu_pro",
+                "gold": "A",
+                "extracted_answer": "A",
+                "status": "error",
+                "generated_token_count": 0,
+                "selected_generated_token_logprobs": [],
+            },
+        ],
+    )
+
+    summary = runner.score_phase(
+        model_id=MODEL_IDS[0],
+        response_root=checkpoint,
+        output_root=output,
+        judge_factory=lambda: (_ for _ in ()).throw(AssertionError("judge called")),
+    )
+
+    assert summary["ppl"] == {
+        "ppl": None,
+        "selected_token_count": 1,
+        "generated_token_count": 1,
+        "covered_records": 1,
+        "total_records": 2,
+        "coverage_ratio": 1.0,
+    }
+    score_path = no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=output)[
+        "scores"
+    ]
+    assert [row["id"] for row in runner.read_jsonl(score_path)] == [
+        "complete-invalid",
+        "global-error",
+    ]
+
+
+def test_interleaved_retry_rows_replace_in_place_and_resume_after_interruptions(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    output = tmp_path / "scores.jsonl"
+    original = [
+        {"id": "keep-a", "status": "ok"},
+        {"id": "retry-a", "status": "error", "error": "503"},
+        {"id": "keep-b", "status": "blocked"},
+        {"id": "retry-b", "status": "error", "error": "503"},
+        {"id": "terminal", "status": "unparseable"},
+    ]
+    runner.append_jsonl(output, original)
+    responses = [
+        {
+            "id": "retry-a",
+            "benchmark": "harmbench",
+            "raw_response": {"text": "answer-a"},
+            "metadata": {"behavior": "behavior-a"},
+        },
+        {
+            "id": "retry-b",
+            "benchmark": "harmbench",
+            "raw_response": {"text": "answer-b"},
+            "metadata": {"behavior": "behavior-b"},
+        },
+    ]
+
+    class InterruptBeforeJudge:
+        def judge_safety(self, request: str, response: str) -> bool:
+            raise KeyboardInterrupt("before replacement")
+
+        def judge_math(self, response: str, expected: str) -> dict[str, bool]:
+            raise AssertionError("unexpected math judge")
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.score_responses(
+            responses, output_path=output, judge=InterruptBeforeJudge()
+        )
+    assert runner.read_jsonl(output) == original
+
+    calls = 0
+
+    class InterruptAfterFirst:
+        def judge_safety(self, request: str, response: str) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt("after first replacement")
+            return True
+
+        def judge_math(self, response: str, expected: str) -> dict[str, bool]:
+            raise AssertionError("unexpected math judge")
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.score_responses(
+            responses, output_path=output, judge=InterruptAfterFirst()
+        )
+    interrupted = runner.read_jsonl(output)
+    assert [row["id"] for row in interrupted] == [
+        "keep-a",
+        "retry-a",
+        "keep-b",
+        "retry-b",
+        "terminal",
+    ]
+    assert interrupted[1]["status"] == "ok"
+    assert interrupted[3]["status"] == "error"
+
+    class ResumeJudge:
+        def judge_safety(self, request: str, response: str) -> bool:
+            return True
+
+    close_output = tmp_path / "close-scores.jsonl"
+    runner.append_jsonl(close_output, original)
+    stream = runner._score_responses_iterable(
+        iter(responses), output_path=close_output, judge=ResumeJudge()
+    )
+    next(stream)
+    stream.close()
+    closed = runner.read_jsonl(close_output)
+    assert [row["id"] for row in closed] == [
+        "keep-a",
+        "retry-a",
+        "keep-b",
+        "retry-b",
+        "terminal",
+    ]
+    assert closed[1]["status"] == "ok"
+    assert closed[3]["status"] == "error"
+
+    written = runner.score_responses(responses, output_path=output, judge=ResumeJudge())
+    assert [row["id"] for row in written] == ["retry-b"]
+    final = runner.read_jsonl(output)
+    assert [row["id"] for row in final] == [
+        "keep-a",
+        "retry-a",
+        "keep-b",
+        "retry-b",
+        "terminal",
+    ]
+    assert len({str(row["id"]) for row in final}) == len(final)
+    assert final[1]["status"] == "ok"
+    assert final[3]["status"] == "ok"
+
+
 def test_generation_summary_does_not_report_unscored_rows_as_zero_accuracy() -> None:
     runner = entrypoint()
     summary = runner.aggregate_records(
@@ -1220,6 +1421,233 @@ def test_score_phase_reads_checkpoint_responses_but_writes_formal_results_to_out
     assert not no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=checkpoint)[
         "scores"
     ].exists()
+
+
+def test_scoring_manifest_hashes_in_bounded_chunks_and_preserves_ordered_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = entrypoint()
+    existing = tmp_path / "responses.jsonl"
+    payload = b"x" * (2 * 1024 * 1024 + 17)
+    existing.write_bytes(payload)
+    missing = tmp_path / "missing.jsonl"
+    paths = {"harmbench": existing, "mmlu_pro": missing}
+
+    class BoundedReader:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+            self.sizes: list[int] = []
+
+        def __enter__(self) -> "BoundedReader":
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args: Any) -> Any:
+            return self.handle.__exit__(*args)
+
+        def read(self, size: int = -1) -> bytes:
+            self.sizes.append(size)
+            return self.handle.read(size)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.handle, name)
+
+    original_open = Path.open
+    readers: list[BoundedReader] = []
+
+    def open_with_spy(self: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = original_open(self, *args, **kwargs)
+        if "b" in str(kwargs.get("mode", args[0] if args else "r")):
+            reader = BoundedReader(handle)
+            readers.append(reader)
+            return reader
+        return handle
+
+    monkeypatch.setattr(Path, "open", open_with_spy)
+    manifest = runner._scoring_manifest(
+        model_id=MODEL_IDS[0],
+        response_root=tmp_path,
+        response_paths=paths,
+        response_ids={"harmbench": ["h0", "h1"], "mmlu_pro": []},
+        judge_model=runner.DEFAULT_JUDGE_MODEL,
+    )
+    assert manifest["response_files"]["harmbench"]["ids"] == ["h0", "h1"]
+    assert manifest["response_files"]["mmlu_pro"]["ids"] == []
+    assert (
+        manifest["response_files"]["mmlu_pro"]["content_sha256"]
+        == hashlib.sha256(b"").hexdigest()
+    )
+    assert readers and all(
+        0 < size <= runner.HASH_CHUNK_SIZE
+        for reader in readers
+        for size in reader.sizes
+    )
+
+
+def test_score_phase_preflights_duplicate_response_ids_before_manifest_or_judge(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths(
+        "harmbench", MODEL_IDS[0], root=checkpoint
+    )["responses"]
+    runner.append_jsonl(
+        response_path,
+        [
+            {"id": "duplicate", "benchmark": "harmbench", "status": "ok"},
+            {"id": "duplicate", "benchmark": "harmbench", "status": "ok"},
+        ],
+    )
+    score_path = no_steering.output_paths("harmbench", MODEL_IDS[0], root=output)[
+        "scores"
+    ]
+    calls: list[str] = []
+    with pytest.raises(ValueError, match="duplicate"):
+        runner.score_phase(
+            model_id=MODEL_IDS[0],
+            response_root=checkpoint,
+            output_root=output,
+            judge_factory=lambda: calls.append("constructed"),
+        )
+    assert calls == []
+    assert not (
+        output / runner.model_spec(MODEL_IDS[0]).slug / "scoring_manifest.json"
+    ).exists()
+    assert not score_path.exists()
+
+
+def test_score_phase_streams_response_rows_without_materializing_response_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=checkpoint)[
+        "responses"
+    ]
+    runner.append_jsonl(
+        response_path,
+        [{"id": "m0", "benchmark": "mmlu_pro", "gold": "A", "extracted_answer": "A"}],
+    )
+    original_read_jsonl = runner.read_jsonl
+
+    def guarded_read_jsonl(path: str | Path) -> list[dict[str, object]]:
+        if Path(path).resolve().is_relative_to(checkpoint.resolve()):
+            raise AssertionError("response file was materialized")
+        return original_read_jsonl(path)
+
+    monkeypatch.setattr(runner, "read_jsonl", guarded_read_jsonl)
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("read_bytes used")),
+    )
+    summary = runner.score_phase(
+        model_id=MODEL_IDS[0],
+        response_root=checkpoint,
+        output_root=output,
+        judge_factory=lambda: object(),
+    )
+    assert summary["ppl"]["total_records"] == 1
+    assert summary["scores"]["mmlu_pro"]["correct"] == 1
+
+
+@pytest.mark.parametrize("benchmark", ["harmbench", "math500"])
+def test_score_phase_does_not_construct_judge_for_existing_empty_response_file(
+    tmp_path: Path, benchmark: str
+) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths(benchmark, MODEL_IDS[0], root=checkpoint)[
+        "responses"
+    ]
+    response_path.parent.mkdir(parents=True, exist_ok=True)
+    response_path.touch()
+    calls: list[str] = []
+
+    runner.score_phase(
+        model_id=MODEL_IDS[0],
+        response_root=checkpoint,
+        output_root=output,
+        judge_factory=lambda: calls.append("constructed"),
+    )
+
+    assert calls == []
+
+
+def test_score_phase_incomplete_invalid_ppl_matches_ppl_summary_without_raising(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=checkpoint)[
+        "responses"
+    ]
+    runner.append_jsonl(
+        response_path,
+        [
+            {
+                "id": "partial-invalid",
+                "benchmark": "mmlu_pro",
+                "gold": "A",
+                "extracted_answer": "A",
+                "status": "ok",
+                "generated_token_count": 2,
+                "selected_generated_token_logprobs": [None],
+            }
+        ],
+    )
+
+    summary = runner.score_phase(
+        model_id=MODEL_IDS[0],
+        response_root=checkpoint,
+        output_root=output,
+        judge_factory=lambda: (_ for _ in ()).throw(AssertionError("judge called")),
+    )
+
+    assert summary["ppl"] == {
+        "ppl": None,
+        "selected_token_count": 1,
+        "generated_token_count": 2,
+        "covered_records": 1,
+        "total_records": 1,
+        "coverage_ratio": 0.5,
+    }
+
+
+def test_score_phase_complete_invalid_ppl_still_raises(tmp_path: Path) -> None:
+    runner = entrypoint()
+    checkpoint = tmp_path / "checkpoints"
+    output = tmp_path / "results"
+    response_path = no_steering.output_paths("mmlu_pro", MODEL_IDS[0], root=checkpoint)[
+        "responses"
+    ]
+    runner.append_jsonl(
+        response_path,
+        [
+            {
+                "id": "complete-invalid",
+                "benchmark": "mmlu_pro",
+                "gold": "A",
+                "extracted_answer": "A",
+                "status": "ok",
+                "generated_token_count": 1,
+                "selected_generated_token_logprobs": [None],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="logprobs must be finite real numbers"):
+        runner.score_phase(
+            model_id=MODEL_IDS[0],
+            response_root=checkpoint,
+            output_root=output,
+            judge_factory=lambda: (_ for _ in ()).throw(AssertionError("judge called")),
+        )
 
 
 def test_main_keeps_tee_and_disables_child_notifications(

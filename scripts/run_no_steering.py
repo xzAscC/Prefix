@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any, cast
 
 from prefix import no_steering
@@ -24,6 +24,7 @@ from prefix.runner import (
     append_jsonl,
     chat_prompt,
     get_engine,
+    _iter_jsonl,
     mmlu_prompt,
     prepare_checkpoint_manifest,
     parse_answer_letter,
@@ -374,28 +375,21 @@ def _response_text(row: Mapping[str, object]) -> str:
     return ""
 
 
-def score_responses(
-    rows: Sequence[Mapping[str, object]],
+def _score_responses_iterable(
+    rows: Iterable[Mapping[str, object]],
     *,
     output_path: str | Path,
     judge: Any,
     judge_model: str | None = None,
-) -> list[dict[str, object]]:
+) -> Iterator[dict[str, object]]:
     existing = read_jsonl(output_path)
     _require_unique_ids(existing, "existing scores")
-    _require_unique_ids(rows, "score input")
     done = {
         str(row["id"])
         for row in existing
         if "id" in row and not _score_row_is_retryable(row)
     }
     retry_ids = {str(row["id"]) for row in existing if _score_row_is_retryable(row)}
-    original_order = [str(row["id"]) for row in existing]
-    if retry_ids:
-        _remove_rows_once(output_path, retry_ids)
-    retry_order_ids = retry_ids
-    retry_ids = set()
-    written: list[dict[str, object]] = []
     for response in rows:
         identifier = str(response["id"])
         if identifier in done:
@@ -413,9 +407,12 @@ def score_responses(
             "judge_model": judge_model,
         }
         if response.get("status", "ok") != "ok":
-            append_jsonl(output_path, [row])
-            written.append(row)
+            if identifier in retry_ids:
+                _replace_score_row(output_path, identifier, row)
+            else:
+                append_jsonl(output_path, [row])
             done.add(identifier)
+            yield row
             continue
         benchmark = str(response.get("benchmark", ""))
         try:
@@ -472,23 +469,30 @@ def score_responses(
             row.update({"status": "error", "error": str(error), "retryable": True})
         except Exception as error:
             row.update({"status": "error", "error": str(error), "retryable": False})
-        append_jsonl(output_path, [row])
-        written.append(row)
+        if identifier in retry_ids:
+            _replace_score_row(output_path, identifier, row)
+        else:
+            append_jsonl(output_path, [row])
         done.add(identifier)
-    if retry_order_ids:
-        current = read_jsonl(output_path)
-        by_id = {str(row["id"]): row for row in current}
-        original_order_set = set(original_order)
-        ordered_ids = original_order + [
-            str(row["id"])
-            for row in current
-            if str(row["id"]) not in original_order_set
-        ]
-        _rewrite_jsonl(
-            output_path,
-            [by_id[identifier] for identifier in ordered_ids if identifier in by_id],
+        yield row
+
+
+def score_responses(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    output_path: str | Path,
+    judge: Any,
+    judge_model: str | None = None,
+) -> list[dict[str, object]]:
+    _require_unique_ids(rows, "score input")
+    return list(
+        _score_responses_iterable(
+            rows,
+            output_path=output_path,
+            judge=judge,
+            judge_model=judge_model,
         )
-    return written
+    )
 
 
 def _rewrite_jsonl(path: str | Path, rows: Sequence[Mapping[str, object]]) -> None:
@@ -562,6 +566,23 @@ def _remove_rows_once(output_path: str | Path, identifiers: set[str]) -> None:
         output_path,
         [row for row in current if str(row.get("id")) not in identifiers],
     )
+
+
+def _replace_score_row(
+    output_path: str | Path, identifier: str, replacement: Mapping[str, object]
+) -> None:
+    current = read_jsonl(output_path)
+    replaced = False
+    rows: list[Mapping[str, object]] = []
+    for row in current:
+        if str(row.get("id")) == identifier:
+            rows.append(replacement)
+            replaced = True
+        else:
+            rows.append(row)
+    if not replaced:
+        raise ValueError(f"retry score id is missing from output: {identifier}")
+    _rewrite_jsonl(output_path, rows)
 
 
 def _score_row_is_retryable(row: Mapping[str, object]) -> bool:
@@ -702,8 +723,16 @@ def score_phase(
 ) -> dict[str, object]:
     if judge_model != DEFAULT_JUDGE_MODEL:
         raise ValueError(f"judge model must be {DEFAULT_JUDGE_MODEL}")
-    response_rows: list[dict[str, object]] = []
     score_rows: list[dict[str, object]] = []
+    ppl_total_nll = 0.0
+    ppl_token_count = 0
+    ppl_selected_count = 0
+    ppl_generated_count = 0
+    ppl_covered_records = 0
+    ppl_total_records = 0
+    ppl_successful_records = 0
+    ppl_complete = True
+    ppl_error: ValueError | None = None
     judge: Any | None = None
     response_paths = {
         benchmark: no_steering.output_paths(benchmark, model_id, root=response_root)[
@@ -711,52 +740,131 @@ def score_phase(
         ]
         for benchmark in DATASET_SCOPES
     }
-    response_data = {
-        benchmark: read_jsonl(path) for benchmark, path in response_paths.items()
-    }
+    response_ids = _preflight_response_files(response_paths)
     _ensure_scoring_manifest(
         output_root=output_root,
         model_id=model_id,
         response_root=response_root,
         response_paths=response_paths,
+        response_ids=response_ids,
         judge_model=judge_model,
     )
+
+    def stream_response_rows(path: Path) -> Iterator[dict[str, object]]:
+        nonlocal ppl_total_nll, ppl_token_count, ppl_selected_count
+        nonlocal ppl_generated_count, ppl_covered_records, ppl_total_records
+        nonlocal ppl_successful_records, ppl_complete, ppl_error
+        for row in _iter_jsonl(path):
+            ppl_total_records += 1
+            status = row.get("status", "ok")
+            if status == "ok":
+                ppl_successful_records += 1
+                selected = cast(
+                    Sequence[object],
+                    row.get("selected_generated_token_logprobs", []),
+                )
+                generated = int(cast(int, row.get("generated_token_count", 0)))
+                ppl_selected_count += len(selected)
+                ppl_generated_count += generated
+                ppl_covered_records += bool(selected)
+                if len(selected) != generated or generated <= 0:
+                    ppl_complete = False
+                else:
+                    try:
+                        ppl_total_nll, ppl_token_count = no_steering._accumulate_ppl(
+                            ppl_total_nll,
+                            ppl_token_count,
+                            {"selected_logprobs": selected},
+                        )
+                    except ValueError as error:
+                        if ppl_error is None:
+                            ppl_error = error
+            else:
+                ppl_complete = False
+            yield row
+
     for benchmark in DATASET_SCOPES:
         response_path = response_paths[benchmark]
         score_path = no_steering.output_paths(benchmark, model_id, root=output_root)[
             "scores"
         ]
-        rows = response_data[benchmark]
-        response_rows.extend(rows)
-        if rows and benchmark in {"harmbench", "math500"} and judge is None:
+        response_rows = stream_response_rows(response_path)
+        if (
+            response_ids[benchmark]
+            and benchmark in {"harmbench", "math500"}
+            and judge is None
+        ):
             judge = (
                 GeminiJudge(model=judge_model)
                 if judge_factory is GeminiJudge
                 else judge_factory()
             )
-        if rows:
-            score_responses(
-                rows,
-                output_path=score_path,
-                judge=judge,
-                judge_model=judge_model,
-            )
+        for _ in _score_responses_iterable(
+            response_rows,
+            output_path=score_path,
+            judge=judge,
+            judge_model=judge_model,
+        ):
+            pass
         score_rows.extend(read_jsonl(score_path))
+    ppl: dict[str, object] = {
+        "ppl": None,
+        "selected_token_count": ppl_selected_count,
+        "generated_token_count": ppl_generated_count,
+        "covered_records": ppl_covered_records,
+        "total_records": ppl_total_records,
+        "coverage_ratio": (
+            ppl_selected_count / ppl_generated_count if ppl_generated_count else 0.0
+        ),
+    }
+    if ppl_selected_count and ppl_complete and ppl_successful_records:
+        if ppl_error is not None:
+            raise ppl_error
+        ppl["ppl"] = no_steering._finalize_ppl(ppl_total_nll, ppl_token_count)
     validate_score_completeness(score_rows, limited=limited)
-    summary = aggregate_records(
-        response_rows,
-        model_id=model_id,
-        sampling={},
-        score_rows=score_rows,
-        limited=limited,
-    )
+    summary: dict[str, object] = {
+        "provenance": runtime_provenance(model_id, sampling={}),
+        "limited": limited,
+        "ppl": ppl,
+        "scores": score_summary(score_rows),
+    }
     cast(dict[str, object], summary["provenance"])["judge_model"] = judge_model
     write_aggregate_artifacts(Path(output_root) / model_spec(model_id).slug, summary)
     return summary
 
 
+HASH_CHUNK_SIZE = 1024 * 1024
+
+
 def _sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+    digest = hashlib.sha256()
+    if not path.exists():
+        return digest.hexdigest()
+    with path.open("rb") as handle:
+        while chunk := handle.read(HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _preflight_response_files(
+    response_paths: Mapping[str, Path],
+) -> dict[str, list[str]]:
+    response_ids: dict[str, list[str]] = {}
+    for benchmark in DATASET_SCOPES:
+        identifiers: list[str] = []
+        seen: set[str] = set()
+        for row in _iter_jsonl(response_paths[benchmark]):
+            if "id" not in row:
+                raise ValueError(f"{benchmark} response row is missing an id")
+            identifier = str(row["id"])
+            if identifier in seen:
+                raise ValueError(
+                    f"{benchmark} response contains duplicate id: {identifier}"
+                )
+            seen.add(identifier)
+            identifiers.append(identifier)
+        response_ids[benchmark] = identifiers
+    return response_ids
 
 
 def _scoring_manifest(
@@ -764,6 +872,7 @@ def _scoring_manifest(
     model_id: str,
     response_root: str | Path,
     response_paths: Mapping[str, Path],
+    response_ids: Mapping[str, Sequence[str]],
     judge_model: str,
 ) -> dict[str, object]:
     from prefix.judge import MATH_PROMPT, SAFETY_PROMPT
@@ -777,7 +886,7 @@ def _scoring_manifest(
             benchmark: {
                 "path": str(path.resolve()),
                 "content_sha256": _sha256_file(path),
-                "ids": [str(row["id"]) for row in read_jsonl(path) if "id" in row],
+                "ids": [str(identifier) for identifier in response_ids[benchmark]],
             }
             for benchmark, path in response_paths.items()
         },
@@ -798,6 +907,7 @@ def _ensure_scoring_manifest(
     model_id: str,
     response_root: str | Path,
     response_paths: Mapping[str, Path],
+    response_ids: Mapping[str, Sequence[str]],
     judge_model: str,
 ) -> None:
     path = Path(output_root) / model_spec(model_id).slug / "scoring_manifest.json"
@@ -805,6 +915,7 @@ def _ensure_scoring_manifest(
         model_id=model_id,
         response_root=response_root,
         response_paths=response_paths,
+        response_ids=response_ids,
         judge_model=judge_model,
     )
     if path.exists():
