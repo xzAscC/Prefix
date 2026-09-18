@@ -9,6 +9,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from prefix.runner import tee_stdout, write_json_atomic
+from prefix.trace_metadata import reference_trace_metadata
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -112,6 +113,8 @@ def main():
         rows,status=load(args.limit,args.allow_partial)
         if not rows:
             raise ValueError('No completed Lemma 8 measurements')
+        trace=reference_trace_metadata(ROOT)
+        status['reference_trace']={k:v for k,v in trace.items() if k!='examples'}
         layers=sorted({r['layer'] for r in rows})
         stats={}
         for layer in [-1,*layers]:
@@ -122,6 +125,7 @@ def main():
         report=['# Lemma 8: prefix versus longer steering','',
                 f'{status["completed_examples"]}/{args.limit} complete examples; {len(rows)} eligible head/condition measurements; zero violations.', '',
                 'Both schedules share the query, original keys/values and the same scaled displacement. The long support contains the short support. Replays use the Section 4 linear-head convention before QK normalization and RoPE, at the query predicting token 128; no independent-generation claim follows.', '',
+                f'The shared continuation is already past EOS in {trace["past_eos_examples"]}/{trace["total_examples"]} examples at this prediction step; these are fixed-state diagnostics, not natural response-end measurements.', '',
                 'The first bound uses the diameter of ALL short-schedule values, including modified and unmodified positions. Attention shares are normalized over ALL visible tokens. The score bound uses the absolute added score, not query drift. The same displacement is constructed at the last input token and is reused when support changes.', '',
                 'Figures show mean ± sample standard deviation after averaging heads (and layers in the mean figure) within each behavior. Input-support comparisons use a fixed cohort with at least 64 input tokens. The conditional table excludes zero-strength and empty-extra-set cases.', '',
                 '| ε (both shares ≤ ε) | Eligible conditions | Behaviors | Mean difference | Mean ε bound | Violations |',

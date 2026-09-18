@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from prefix.runner import tee_stdout, write_json_atomic
+from prefix.trace_metadata import reference_trace_metadata
 
 ROOT = Path(__file__).resolve().parents[1]
 FIELDS = ['R', 'C', 'delta_C', 'delta_perp']
@@ -48,6 +49,7 @@ def summarize(rows):
 
 def load(study, limit, allow_partial):
     rows, completed, expected_units, metadata = [], [], None, None
+    trace = reference_trace_metadata(ROOT) if study == 'fixed' else None
     for index in range(limit):
         path = ROOT / f'results/section5_{study}_{index:03d}.json'
         if not path.exists():
@@ -77,11 +79,13 @@ def load(study, limit, allow_partial):
                 raise ValueError(f'Incomplete fixed-head conditions: {path}')
             for r in unit['rows']:
                 if r['eligible']:
-                    rows.append({**r, 'index': index, 'base_length': unit['base_length']})
+                    rows.append({**r, 'index': index, 'base_length': unit['base_length'],
+                                 'continued_after_eos': trace['examples'][str(index)]['past_eos_at_prediction']})
         else:
             rows.extend({**r, 'index': index} for r in state['units'].values() if r['eligible'])
     return rows, dict(completed_examples=len(completed), requested_examples=limit,
-                      complete=len(completed)==limit, manifest=metadata)
+                      complete=len(completed)==limit, manifest=metadata,
+                      reference_trace={k:v for k,v in trace.items() if k!='examples'} if trace else None)
 
 
 def figure(groups, length_groups, study, complete):
@@ -161,7 +165,7 @@ def main():
             summary[study] = {**status, 'groups': groups, 'input_length_matched_cohort': length_groups}
             write_json_atomic(ROOT / f'results/section5_{study}_summary.json', summary[study])
             report += [f'## {study}: {status["completed_examples"]}/{args.limit} complete examples', '',
-                       '| Method (m=8, α=1) | n | R | C | ΔC | Continued after EOS |',
+                       f'| Method (m=8, α=1) | n | R | C | ΔC | {"Reference trace past EOS" if study=="fixed" else "Continued after EOS"} |',
                        '|---|---:|---:|---:|---:|---:|']
             for g in groups:
                 if g['id'] in ['unsteered','prompt_m8','single_m8_a1','full_m8_a1']:
