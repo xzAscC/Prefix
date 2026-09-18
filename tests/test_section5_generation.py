@@ -63,3 +63,9 @@ def test_export_input_ids_is_resumable_and_excludes_prompt_and_continuation(tmp_
     assert calls == [0,1]
     import json
     assert json.loads(path.read_text())[1]['input_ids'] == [1,2]
+
+
+def test_first_eos_checks_all_model_configured_stop_tokens():
+    assert module.first_eos_position([8,151643,7,151645],[151645,151643]) == 2
+    assert module.first_eos_position([8,151645],151645) == 2
+    assert module.first_eos_position([8,9],[151645,151643]) is None

@@ -29,3 +29,13 @@ def test_validator_accepts_explicit_undefined_C_but_never_nan_R():
     value['R'] = float('nan')
     with pytest.raises(ValueError):
         module.validate_row(value)
+
+
+def test_eos_repair_uses_tokens_without_modifying_scientific_metrics():
+    value=dict(first_eos=4,continued_after_eos=True,R=.8,C=.2)
+    with pytest.raises(ValueError,match='EOS'):
+        module.check_eos(value,[7,151643,8,151645],[151645,151643],False)
+    corrected=module.check_eos(value,[7,151643,8,151645],[151645,151643],True)
+    assert corrected['first_eos']==2
+    assert corrected['R']==.8 and corrected['C']==.2
+    assert value['first_eos']==4

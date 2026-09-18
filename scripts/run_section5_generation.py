@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-from pathlib import Path
 import sys
 
 import numpy as np
@@ -32,6 +31,11 @@ def export_inputs(path, load, limit):
         write_json_atomic(path, rows)
         print(f'Input export {index + 1}/{limit} saved', flush=True)
     return rows
+
+
+def first_eos_position(tokens, eos_ids):
+    eos_ids = [eos_ids] if isinstance(eos_ids, int) else eos_ids
+    return next((i+1 for i, token in enumerate(tokens) if token in eos_ids), None)
 
 
 def selected_positions(method, k, input_length, absolute_positions):
@@ -57,7 +61,7 @@ def decode_resume(path, manifest, predict, target=128):
 
 def generate(limit, start, layer, head, condition_ids=None):
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM
     torch.set_num_threads(4)
     torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
     source = json.loads((ROOT / 'results/section4_long_manifest.json').read_text())
@@ -72,7 +76,6 @@ def generate(limit, start, layer, head, condition_ids=None):
                     decoding='greedy; ignore EOS to reach exactly 128 tokens; first EOS recorded',
                     intervention='normalized attention input, before native QK norm and RoPE',
                     reference_prompt_ids=source['prompt_ids'], transformers=__import__('transformers').__version__)
-    tokenizer = AutoTokenizer.from_pretrained(source['model'], revision=source['revision'], local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(source['model'], revision=source['revision'],
                 local_files_only=True, dtype=torch.bfloat16, attn_implementation='sdpa').to('cuda').eval()
     attn = model.model.layers[layer].self_attn
@@ -147,10 +150,11 @@ def generate(limit, start, layer, head, condition_ids=None):
                     del cache
             baseline = state if c['method'] == 'unsteered' else json.loads(baseline_path.read_text())
             metrics = measured_cosines(state['final_output'], baseline['final_output'], d)
-            eos = tokenizer.eos_token_id
-            first_eos = next((i+1 for i,t in enumerate(state['tokens']) if t == eos), None)
+            eos = model.generation_config.eos_token_id
+            first_eos = first_eos_position(state['tokens'], eos)
             return {**c, **metrics, 'eligible': True, 'index': index, 'behavior_id': payload['behavior_id'],
                     'layer': layer, 'head': head, 'base_length': n, 'generated_count': len(state['tokens']),
+                    'eos_token_ids': eos if isinstance(eos, list) else [eos],
                     'first_eos': first_eos, 'continued_after_eos': first_eos is not None and first_eos < 128,
                     'tokens_sha256': __import__('hashlib').sha256(json.dumps(state['tokens']).encode()).hexdigest()}
         requested = condition_ids or [c['id'] for c in conditions()]
