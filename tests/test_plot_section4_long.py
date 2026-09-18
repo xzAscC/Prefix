@@ -46,3 +46,41 @@ def test_trends_report_decreases_without_forcing_monotonicity():
     result = module.trends(stats)[0]
     assert result['monotone_nondecreasing'] is False
     assert result['last_minus_first'] == -1.
+
+
+def test_layer_mean_uses_paired_inputs_before_computing_std():
+    rows = []
+    for j,layer in enumerate([2,8,17,26,33]):
+        for index in [0,1]:
+            for head in [0,16]:
+                error = 10*(j+1) + index*[1,-2,3,-4,5][j] + (-2 if head==0 else 2)
+                rows.append(dict(layer=layer,index=index,head=head,base_length=128,
+                                 m=4,k=1,g=0,eligible=True,error=error,bound_certified=error+100))
+    stats = module.layer_mean_statistics(rows)
+    assert len(stats)==2
+    for row in stats:
+        assert row['layer']==-1
+        assert row['error']['n']==2
+        assert row['error']['mean']==pytest.approx(30.3)
+        assert row['error']['std']==pytest.approx(.6/2**.5)
+        assert row['bound']['mean']==pytest.approx(130.3)
+
+
+def test_combined_figure_has_shared_error_bound_axis_and_prompt_panel():
+    stats = [dict(layer=2,figure=figure,m=m,k=k,g=g,
+                  error=dict(mean=2.,std=.5,n=95 if figure=='steering' else 400),
+                  bound=dict(mean=5.,std=1.,n=95 if figure=='steering' else 400))
+             for figure,m,k,g in [('steering',4,1,0),('steering',4,4,0),
+                                   ('steering',4,4,4),('prompt',1,1,0),('prompt',4,1,0)]]
+    fig = module.combined_figure(stats,2)
+    left,right = fig.axes
+    assert len(fig.axes)==2
+    measured = [line for line in left.lines if 'Measured' in line.get_label()]
+    bounds = [line for line in left.lines if 'Bound' in line.get_label()]
+    assert len(measured)==len(bounds)==2
+    assert all(line.get_linestyle()=='-' for line in measured)
+    assert all(line.get_linestyle()=='--' for line in bounds)
+    assert right.lines[0].get_color() not in {line.get_color() for line in measured}
+    assert all(y==2 for line in measured for y in line.get_ydata())
+    assert all(y==5 for line in bounds for y in line.get_ydata())
+    module.plt.close(fig)

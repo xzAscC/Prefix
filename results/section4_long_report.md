@@ -4,13 +4,14 @@ Qwen3-4B, 400 HarmBench inputs; layers 3, 9, 18, 27, 34 (one-based). Two query h
 
 ## Figures
 
-- Layer 3: [steering count](../figs/section4_layer03_steering_length.pdf), [prompt length](../figs/section4_layer03_prompt_length.pdf).
-- Layer 9: [steering count](../figs/section4_layer09_steering_length.pdf), [prompt length](../figs/section4_layer09_prompt_length.pdf).
-- Layer 18: [steering count](../figs/section4_layer18_steering_length.pdf), [prompt length](../figs/section4_layer18_prompt_length.pdf).
-- Layer 27: [steering count](../figs/section4_layer27_steering_length.pdf), [prompt length](../figs/section4_layer27_prompt_length.pdf).
-- Layer 34: [steering count](../figs/section4_layer34_steering_length.pdf), [prompt length](../figs/section4_layer34_prompt_length.pdf).
+- Layer 3: [combined figure](../figs/section4_layer03_combined.pdf).
+- Layer 9: [combined figure](../figs/section4_layer09_combined.pdf).
+- Layer 18: [combined figure](../figs/section4_layer18_combined.pdf).
+- Layer 27: [combined figure](../figs/section4_layer27_combined.pdf).
+- Layer 34: [combined figure](../figs/section4_layer34_combined.pdf).
+- Five-layer mean: [combined figure](../figs/section4_layer_mean_combined.pdf).
 
-There are two figure types per layer, ten PDFs total. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
+Each layer has one two-panel PDF: the left panel overlays measured error (solid) and the certified theoretical upper bound (dashed); the right panel shows prompt-length error in purple. A sixth PDF averages the five layers. Open [the plotting notebook](../notebooks/section4_attention_bounds.ipynb) to adjust and regenerate the figures from the tracked summary without rerunning the model. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
 
 - Fixed appended prompt length m=4: input-only steering uses the last k input positions. Mixed steering uses four input positions plus g generated positions, with total k+g=4,8,16,32,64,128. Both curves use the **same 95 inputs with at least 128 input tokens**, including the model chat template. No short inputs are padded or silently clamped. The fixed subset's functional categories are {'contextual': 95}; its conclusions do not automatically generalize to the full dataset.
 - Fixed single-token steering k=1: vary the appended prompt length m over the eight token counts, using all 400 inputs. This x-axis is the appended instruction block length, not the HarmBench question length or number of input examples.
@@ -25,7 +26,7 @@ Extend the original eight-token prompt's common greedy trace from 16 to **128 st
 
 Long prompt blocks are nested prefixes of one extended safety instruction. Their causal representations come from the original input plus 128 prompt tokens. Generated states come from the common eight-token-prompt trace. Combining these into a fixed-state library holds the query and generated representations constant across m; it is not a claim that separate prompts produce identical states in the full architecture. Every layer shares input identities, selected positions, and trace token IDs.
 
-Actual error is ||o_steer - o_prompt||_2. The bound follows the same anchored-at-last-input-token calculation as the initial study, using certified between-grid Jacobian envelopes and the diameter cap. Blocks larger than eight coordinates use conservative column-norm upper bounds; sampled sign probes provide a lower estimate. Large-count bounds may be loose or saturate at the diameter. Increasing error is a hypothesis, not an enforced constraint, and lengths also change instruction content.
+Actual error is ||o_steer - o_prompt||_2, without division by the output norm, head dimension, or diameter. Softmax and the model input layer normalization are part of constructing the attention output, not a normalization of this error metric. The five-layer mean first averages the ten head-level scalar errors (five layers × two heads) for each input, then computes mean ± sample std across inputs; it does not average the five standard deviations or take the norm after averaging vectors. Bounds are averaged identically. Layers with larger raw error magnitudes contribute more to the resulting mean. The bound follows the same anchored-at-last-input-token calculation as the initial study, using certified between-grid Jacobian envelopes and the diameter cap. Blocks larger than eight coordinates use conservative column-norm upper bounds; sampled sign probes provide a lower estimate. Large-count bounds may be loose or saturate at the diameter. Increasing error is a hypothesis, not an enforced constraint, and lengths also change instruction content.
 
 ## Numerical audit
 
@@ -54,7 +55,33 @@ Actual error is ||o_steer - o_prompt||_2. The bound follows the same anchored-at
 
 These are descriptive mean differences, without a significance claim. A lower single-token endpoint does not imply monotonicity at intermediate counts.
 
-## Mean ± std
+## Five-layer mean ± std
+
+| Setting | m | k | g | n | Error mean ± std | Bound mean ± std |
+|:---|---:|---:|---:|---:|---:|---:|
+| prompt | 1 | 1 | 0 | 400 | 0.3636 ± 1.5100 | 33.0631 ± 4.8953 |
+| prompt | 2 | 1 | 0 | 400 | 0.4522 ± 1.7553 | 36.7238 ± 3.2534 |
+| prompt | 4 | 1 | 0 | 400 | 0.6837 ± 2.1503 | 38.4403 ± 3.0919 |
+| prompt | 8 | 1 | 0 | 400 | 0.9943 ± 2.6057 | 39.5916 ± 3.0006 |
+| prompt | 16 | 1 | 0 | 400 | 1.0821 ± 2.6077 | 40.4565 ± 3.0344 |
+| prompt | 32 | 1 | 0 | 400 | 1.2141 ± 2.6497 | 41.5557 ± 3.0138 |
+| prompt | 64 | 1 | 0 | 400 | 1.4387 ± 2.8379 | 42.8982 ± 2.9456 |
+| prompt | 128 | 1 | 0 | 400 | 2.1151 ± 3.5182 | 44.2840 ± 3.0733 |
+| steering | 4 | 1 | 0 | 95 | 0.2768 ± 1.2460 | 41.6643 ± 2.5501 |
+| steering | 4 | 2 | 0 | 95 | 0.4298 ± 1.3967 | 41.9003 ± 2.4999 |
+| steering | 4 | 4 | 0 | 95 | 0.5179 ± 1.4810 | 42.3365 ± 2.5040 |
+| steering | 4 | 4 | 4 | 95 | 0.5874 ± 1.4861 | 43.2231 ± 2.5447 |
+| steering | 4 | 4 | 12 | 95 | 0.6723 ± 1.4991 | 44.5393 ± 2.5733 |
+| steering | 4 | 4 | 28 | 95 | 0.9792 ± 1.5536 | 45.5759 ± 2.6431 |
+| steering | 4 | 4 | 60 | 95 | 1.3592 ± 1.5538 | 47.1300 ± 2.9742 |
+| steering | 4 | 4 | 124 | 95 | 1.8972 ± 1.6516 | 48.7532 ± 2.9196 |
+| steering | 4 | 8 | 0 | 95 | 0.5577 ± 1.4885 | 42.4494 ± 2.5401 |
+| steering | 4 | 16 | 0 | 95 | 0.5989 ± 1.5087 | 43.4379 ± 2.9258 |
+| steering | 4 | 32 | 0 | 95 | 0.5832 ± 1.4771 | 43.9553 ± 3.0097 |
+| steering | 4 | 64 | 0 | 95 | 0.5730 ± 1.4783 | 45.1538 ± 3.2261 |
+| steering | 4 | 128 | 0 | 95 | 0.5754 ± 1.4793 | 46.3111 ± 3.0838 |
+
+## Per-layer mean ± std
 
 | Layer | Setting | m | k | g | n | Error mean ± std | Bound mean ± std |
 |---:|:---|---:|---:|---:|---:|---:|---:|

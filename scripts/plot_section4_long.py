@@ -67,6 +67,11 @@ def statistics(rows):
             for (layer,figure,m,k,g),group in sorted(groups.items())]
 
 
+def layer_mean_statistics(rows):
+    """Average the ten head-level errors per input, then summarize inputs."""
+    return statistics([{**row, 'layer':-1} for row in rows])
+
+
 def trends(stats):
     output = []
     for layer in sorted({r['layer'] for r in stats}):
@@ -87,52 +92,87 @@ def trends(stats):
     return output
 
 
+COLORS = {'input':'#2673B8', 'mixed':'#D97721', 'prompt':'#7B4FA3'}
+STYLE = {
+    'font.family':'DejaVu Sans', 'font.size':10, 'axes.titlesize':11,
+    'axes.labelsize':10, 'legend.fontsize':8, 'pdf.fonttype':42,
+    'axes.spines.top':False, 'axes.spines.right':False,
+    'axes.edgecolor':'#999999', 'axes.linewidth':.7,
+    'xtick.color':'#444444', 'ytick.color':'#444444',
+    'figure.facecolor':'white', 'savefig.facecolor':'white',
+}
+
+
 def line(ax, rows, field, x, label, color):
     rows = sorted(rows,key=x)
     xs = [x(r) for r in rows]
     means = np.array([r[field]['mean'] for r in rows])
     stds = np.array([r[field]['std'] for r in rows])
-    ax.plot(xs,means,'-o',label=label,color=color,linewidth=1.8,markersize=4)
-    ax.fill_between(xs,means-stds,means+stds,color=color,alpha=.15)
+    bound = field=='bound'
+    ax.plot(xs,means,linestyle='--' if bound else '-', marker='s' if bound else 'o',
+            label=label,color=color,linewidth=1.7,markersize=4,
+            markerfacecolor='white' if bound else color,zorder=3)
+    ax.fill_between(xs,means-stds,means+stds,color=color,alpha=.07 if bound else .14,
+                    linewidth=0,zorder=1)
 
 
 def format_axis(ax, xlabel):
     ax.set_xscale('log',base=2)
     ax.set_xticks(LENGTHS,labels=[str(x) for x in LENGTHS])
-    ax.set_xlabel(xlabel)
-    ax.axhline(0,color='gray',linewidth=.6)
-    ax.grid(alpha=.18)
+    ax.set_xlabel(xlabel,labelpad=8)
+    ax.grid(axis='y',color='#E6E8EB',linewidth=.65)
+    ax.set_axisbelow(True)
+    ax.margins(x=.04)
+    ax.tick_params(length=3,width=.6)
 
 
-def plots(stats):
-    plt.rcParams.update({'font.size':11,'pdf.fonttype':42,
-                         'axes.spines.top':False,'axes.spines.right':False})
-    for layer in sorted({r['layer'] for r in stats}):
-        steering = [r for r in stats if r['layer']==layer and r['figure']=='steering']
-        n = steering[0]['error']['n']
-        fig,axes = plt.subplots(1,2,figsize=(10,4),constrained_layout=True)
-        for ax,field,title in zip(axes,['error','bound'],['Measured error','Error upper bound']):
-            line(ax,[r for r in steering if r['g']==0],field,lambda r:r['k'],
-                 'Input positions only','#0072B2')
-            line(ax,[r for r in steering if r['g'] or r['k']==4],field,lambda r:r['k']+r['g'],
-                 '4 input + generated positions','#D55E00')
-            format_axis(ax,'Number of steered positions')
-            ax.set_ylabel(r'$\|o_{\mathrm{steer}}-o_{\mathrm{prompt}}\|_2$' if field=='error'
-                          else 'Certified lemma upper bound')
-            ax.set_title(title)
-            ax.legend(fontsize=8)
-        fig.suptitle(f'Layer {layer+1} · fixed prompt length m = 4 · {n} matched inputs\nMean ± std across inputs (two heads averaged per input)',fontsize=12)
-        fig.savefig(ROOT/f'figs/section4_layer{layer+1:02d}_steering_length.pdf',bbox_inches='tight')
+def combined_figure(stats, layer):
+    """One figure: overlaid error/bound at left, prompt-length error at right."""
+    steering = [r for r in stats if r['layer']==layer and r['figure']=='steering']
+    prompt = [r for r in stats if r['layer']==layer and r['figure']=='prompt']
+    label = 'Five-layer mean' if layer==-1 else f'Layer {layer+1}'
+    with plt.rc_context(STYLE):
+        fig,(left,right) = plt.subplots(1,2,figsize=(11.2,4.5),gridspec_kw={'width_ratios':[1.25,1]})
+        for rows,color,name in [
+            ([r for r in steering if r['g']==0],COLORS['input'],'input only'),
+            ([r for r in steering if r['g'] or r['k']==4],COLORS['mixed'],'4 input + generated'),
+        ]:
+            for field,kind in [('error','Measured'),('bound','Bound')]:
+                line(left,rows,field,lambda r:r['k']+r['g'],f'{kind} · {name}',color)
+        format_axis(left,'Steered positions')
+        left.set_ylabel('Raw L₂ error / theoretical bound',labelpad=8)
+        left.set_title(f'(a) Fixed prompt length m = 4  ·  n = {steering[0]["error"]["n"]}',loc='left',pad=12)
+        left.legend(loc='upper left',bbox_to_anchor=(0,1.01),frameon=False,handlelength=2.6,
+                    labelspacing=.45,borderaxespad=.4)
+        # Space above data keeps the four-entry legend clear without hiding any band.
+        low,high = left.get_ylim()
+        left.set_ylim(low,high+.34*(high-low))
+        line(right,prompt,'error',lambda r:r['m'],'Measured · single-token steering',COLORS['prompt'])
+        format_axis(right,'Appended prompt tokens')
+        right.set_ylabel('Raw L₂ error',labelpad=8)
+        right.set_title(f'(b) Single-token steering  ·  n = {prompt[0]["error"]["n"]}',loc='left',pad=12)
+        right.legend(loc='upper left',frameon=False,handlelength=2.6)
+        low,high = right.get_ylim()
+        right.set_ylim(low,high+.13*(high-low))
+        fig.suptitle(f'Qwen3-4B  /  {label}',x=.085,ha='left',y=.99,fontsize=14,fontweight='bold')
+        fig.text(.085,.015,'Mean ± std across inputs · raw, unnormalized attention-output differences',
+                 fontsize=9,color='#666666')
+        fig.subplots_adjust(left=.085,right=.985,bottom=.18,top=.80,wspace=.32)
+    return fig
+
+
+def figure_name(layer):
+    return 'section4_layer_mean_combined.pdf' if layer==-1 else f'section4_layer{layer+1:02d}_combined.pdf'
+
+
+def plots(stats, mean_stats=()):
+    combined = list(stats)+list(mean_stats)
+    for layer in sorted({r['layer'] for r in combined}):
+        fig = combined_figure(combined,layer)
+        path = ROOT/'figs'/figure_name(layer)
+        fig.savefig(path,bbox_inches='tight')
         plt.close(fig)
-        prompt = [r for r in stats if r['layer']==layer and r['figure']=='prompt']
-        fig,ax = plt.subplots(figsize=(6,4),constrained_layout=True)
-        line(ax,prompt,'error',lambda r:r['m'],'Single-token steering','#0072B2')
-        format_axis(ax,'Number of appended prompt tokens m')
-        ax.set_ylabel(r'$\|o_{\mathrm{steer}}-o_{\mathrm{prompt}}\|_2$')
-        ax.set_title(f'Layer {layer+1} · single-token steering\n{prompt[0]["error"]["n"]} inputs · mean ± std',fontsize=12)
-        fig.savefig(ROOT/f'figs/section4_layer{layer+1:02d}_prompt_length.pdf',bbox_inches='tight')
-        plt.close(fig)
-        print(f'Saved two PDFs for layer {layer+1}',flush=True)
+        print(f'Saved {path.name}',flush=True)
 
 
 def audit(rows):
@@ -153,16 +193,22 @@ def audit(rows):
                 cohort_indices=sorted({r['index'] for r in valid if r['base_length']>=128}))
 
 
-def report(rows,stats,summary):
+def report(rows,stats,summary,mean_stats=()):
     table = ['| Layer | Setting | m | k | g | n | Error mean ± std | Bound mean ± std |',
              '|---:|:---|---:|---:|---:|---:|---:|---:|']
     for r in stats:
         table.append(f'| {r["layer"]+1} | {r["figure"]} | {r["m"]} | {r["k"]} | {r["g"]} | {r["error"]["n"]} | '
                      f'{r["error"]["mean"]:.4f} ± {r["error"]["std"]:.4f} | '
                      f'{r["bound"]["mean"]:.4f} ± {r["bound"]["std"]:.4f} |')
-    links = '\n'.join(f'- Layer {layer+1}: [steering count](../figs/section4_layer{layer+1:02d}_steering_length.pdf), '
-                      f'[prompt length](../figs/section4_layer{layer+1:02d}_prompt_length.pdf).'
+    mean_table = ['| Setting | m | k | g | n | Error mean ± std | Bound mean ± std |',
+                  '|:---|---:|---:|---:|---:|---:|---:|']
+    for r in mean_stats:
+        mean_table.append(f'| {r["figure"]} | {r["m"]} | {r["k"]} | {r["g"]} | {r["error"]["n"]} | '
+                          f'{r["error"]["mean"]:.4f} ± {r["error"]["std"]:.4f} | '
+                          f'{r["bound"]["mean"]:.4f} ± {r["bound"]["std"]:.4f} |')
+    links = '\n'.join(f'- Layer {layer+1}: [combined figure](../figs/{figure_name(layer)}).'
                       for layer in sorted({r['layer'] for r in stats}))
+    links += f'\n- Five-layer mean: [combined figure](../figs/{figure_name(-1)}).'
     n = len({r['index'] for r in rows})
     early_eos = 0
     for path in sorted((ROOT/'checkpoints').glob('section4_long_decode_*.json')):
@@ -184,7 +230,7 @@ Qwen3-4B, {n} HarmBench inputs; layers 3, 9, 18, 27, 34 (one-based). Two query h
 
 {links}
 
-There are two figure types per layer, ten PDFs total. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
+Each layer has one two-panel PDF: the left panel overlays measured error (solid) and the certified theoretical upper bound (dashed); the right panel shows prompt-length error in purple. A sixth PDF averages the five layers. Open [the plotting notebook](../notebooks/section4_attention_bounds.ipynb) to adjust and regenerate the figures from the tracked summary without rerunning the model. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
 
 - Fixed appended prompt length m=4: input-only steering uses the last k input positions. Mixed steering uses four input positions plus g generated positions, with total k+g=4,8,16,32,64,128. Both curves use the **same {len(summary['cohort_indices'])} inputs with at least 128 input tokens**, including the model chat template. No short inputs are padded or silently clamped. The fixed subset's functional categories are {summary['cohort_categories']}; its conclusions do not automatically generalize to the full dataset.
 - Fixed single-token steering k=1: vary the appended prompt length m over the eight token counts, using all {n} inputs. This x-axis is the appended instruction block length, not the HarmBench question length or number of input examples.
@@ -199,7 +245,7 @@ Extend the original eight-token prompt's common greedy trace from 16 to **128 st
 
 Long prompt blocks are nested prefixes of one extended safety instruction. Their causal representations come from the original input plus 128 prompt tokens. Generated states come from the common eight-token-prompt trace. Combining these into a fixed-state library holds the query and generated representations constant across m; it is not a claim that separate prompts produce identical states in the full architecture. Every layer shares input identities, selected positions, and trace token IDs.
 
-Actual error is ||o_steer - o_prompt||_2. The bound follows the same anchored-at-last-input-token calculation as the initial study, using certified between-grid Jacobian envelopes and the diameter cap. Blocks larger than eight coordinates use conservative column-norm upper bounds; sampled sign probes provide a lower estimate. Large-count bounds may be loose or saturate at the diameter. Increasing error is a hypothesis, not an enforced constraint, and lengths also change instruction content.
+Actual error is ||o_steer - o_prompt||_2, without division by the output norm, head dimension, or diameter. Softmax and the model input layer normalization are part of constructing the attention output, not a normalization of this error metric. The five-layer mean first averages the ten head-level scalar errors (five layers × two heads) for each input, then computes mean ± sample std across inputs; it does not average the five standard deviations or take the norm after averaging vectors. Bounds are averaged identically. Layers with larger raw error magnitudes contribute more to the resulting mean. The bound follows the same anchored-at-last-input-token calculation as the initial study, using certified between-grid Jacobian envelopes and the diameter cap. Blocks larger than eight coordinates use conservative column-norm upper bounds; sampled sign probes provide a lower estimate. Large-count bounds may be loose or saturate at the diameter. Increasing error is a hypothesis, not an enforced constraint, and lengths also change instruction content.
 
 ## Numerical audit
 
@@ -214,7 +260,11 @@ Actual error is ||o_steer - o_prompt||_2. The bound follows the same anchored-at
 
 These are descriptive mean differences, without a significance claim. A lower single-token endpoint does not imply monotonicity at intermediate counts.
 
-## Mean ± std
+## Five-layer mean ± std
+
+{chr(10).join(mean_table)}
+
+## Per-layer mean ± std
 
 {chr(10).join(table)}
 
@@ -229,7 +279,7 @@ uv run python scripts/plot_section4_long.py
 Decode checkpoints persist after every token; analysis journals persist after every condition and consolidate to JSON per input. Completed conditions are skipped on restart. Use analyze --start N --stride W for W independent workers. Logs contain logs only. Notifications are disabled; no email is sent. Large checkpoints and raw conditions remain local; manifests, summary, CSV, report, and PDF figures are retained in Git.
 '''
     (ROOT/'results/section4_long_report.md').write_text(body)
-    write_json_atomic(ROOT/'results/section4_long_summary.json',{**summary,'comparison':stats})
+    write_json_atomic(ROOT/'results/section4_long_summary.json',{**summary,'comparison':stats,'layer_mean_comparison':list(mean_stats)})
     fields = ['layer','figure','m','k','g','n','error_mean','error_std','bound_mean','bound_std']
     with (ROOT/'results/section4_long_comparison.csv').open('w') as output:
         writer = csv.DictWriter(output,fieldnames=fields,lineterminator='\n')
@@ -248,8 +298,9 @@ def main():
         rows = load_rows(args.limit)
         summary = audit(rows)
         stats = statistics(rows)
-        plots(stats)
-        report(rows,stats,summary)
+        mean_stats = layer_mean_statistics(rows)
+        plots(stats,mean_stats)
+        report(rows,stats,summary,mean_stats)
         print(json.dumps(summary,indent=2),flush=True)
 
 
