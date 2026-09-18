@@ -37,3 +37,13 @@ def test_small_before_share_is_not_sufficient_after_large_key_shift():
     assert row['w_short'] < 1e-8
     assert row['w_long'] > .99
     assert row['error'] > 1.9
+
+
+def test_short_diameter_includes_existing_interventions():
+    # Originally all values coincide. The already-steered position separates
+    # them, and using the original zero diameter would invalidate the bound.
+    row = evaluate_schedules(np.zeros((3,1)),np.zeros((3,1)),np.ones(1),
+                             [0],[0,1],np.array([-2.]),np.ones(1))
+    assert row['diameter_short'] == pytest.approx(1.)
+    assert row['error'] > row['w_long'] * row['value_shift_norm']
+    assert row['error'] <= row['bound_shares']
