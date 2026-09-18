@@ -1,4 +1,4 @@
-"""The standalone figure uses one matched cohort for steering and prompt."""
+"""The standalone figure uses one matched cohort for all conditions."""
 from pathlib import Path
 
 import nbformat
@@ -22,15 +22,19 @@ def test_section5_length_notebook(tmp_path, start_in_notebooks):
         if state['units']['17_0']['base_length'] >= 64:
             (tmp_path / 'results' / path.name).write_bytes(path.read_bytes())
     notebook.cells.append(nbformat.v4.new_code_cell("""
-assert len(cohort) == 100
+assert all(len(rows) == 100 for rows in cohort.values())
 assert len(fig.axes) == 2
-assert all(len(ax.lines) == 2 for ax in fig.axes)
+assert all(len(ax.lines) == 3 for ax in fig.axes)
 assert all(ax.lines[1].get_label() == 'Prompt (m=8)' for ax in fig.axes)
+assert all(ax.lines[2].get_label() == 'Unsteered' for ax in fig.axes)
 assert all(ax.lines[0].get_label() == 'Steering' for ax in fig.axes)
 assert all(len(ax.lines[0].get_xdata()) == 5 for ax in fig.axes)
 assert all(ax.get_xticklabels()[-1].get_text() == 'Full' for ax in fig.axes)
-assert all(ax.lines[1].get_ydata()[0] == baseline[field]['mean']
+assert all(ax.lines[1].get_ydata()[0] == baseline['prompt'][field]['mean']
            for ax, field in zip(fig.axes, ('R', 'C')))
+assert all(ax.lines[2].get_ydata()[0] == baseline['unsteered'][field]['mean']
+           for ax, field in zip(fig.axes, ('R', 'C')))
+assert baseline['unsteered']['R']['mean'] == 1.0
 assert (ROOT / 'figs/section5_input_length.pdf').read_bytes().startswith(b'%PDF')
 """))
     NotebookClient(notebook, timeout=120, kernel_name='python3',
