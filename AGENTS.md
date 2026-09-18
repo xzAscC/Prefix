@@ -1,7 +1,7 @@
 # AGENTS
 
 1. Use TDD: write tests before writing source code.
-2. Start work on a new branch. When the work is finished, commit all changes and open a PR. Keep the PR concise and clear; do not add fluff.
+2. Before starting work, check for open PRs. If a PR is already open for the current work, continue on its branch, commit the changes, and update that PR; do not create another PR. If multiple PRs are open, use the one that matches the current work. Only when no existing open PR applies should you start a new branch and open a PR. Keep the PR concise and clear; do not add fluff.
 3. Use only the folders already listed. Put each file in its corresponding folder. Do not create new folders unless I am unavailable and you cannot ask me.
 4. Use uv to manage virtual environments.
 5. If you are unsure, ask me first. If you cannot ask me, search the website or documentation. Do not guess.
