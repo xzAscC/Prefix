@@ -22,6 +22,17 @@ def test_notebook_draws_without_importing_plot_script(tmp_path):
         (ROOT / 'results/section4_long_summary.json').read_text())
     (tmp_path / 'figs').mkdir()
     (tmp_path / 'logs').mkdir()
+    notebook.cells.append(nbformat.v4.new_code_cell("""
+fig = combined_figure(-1)
+right = fig.axes[1]
+assert right.get_ylim()[0] == 0
+assert all((path.vertices[:, 1] >= 0).all()
+           for band in right.collections for path in band.get_paths())
+expected = [row['error']['mean'] for row in stats
+            if row['layer'] == -1 and row['figure'] == 'prompt']
+np.testing.assert_allclose(right.lines[0].get_ydata(), expected)
+plt.close(fig)
+"""))
     NotebookClient(notebook, timeout=120, kernel_name='python3',
                    resources={'metadata': {'path': str(tmp_path)}}).execute()
 

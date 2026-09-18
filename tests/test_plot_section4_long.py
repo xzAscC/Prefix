@@ -78,6 +78,9 @@ def test_combined_figure_has_shared_error_bound_axis_and_prompt_panel(error_std)
     assert len(fig.axes)==2
     assert left.get_yscale()=='log'
     assert right.get_yscale()=='linear'
+    assert right.get_ylim()[0] == 0
+    assert all((path.vertices[:,1]>=0).all() for band in right.collections
+               for path in band.get_paths())
     assert left.get_ylim()[0]>0
     for band in left.collections:
         assert all((path.vertices[:,1]>0).all() for path in band.get_paths())

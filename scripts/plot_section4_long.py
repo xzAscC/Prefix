@@ -103,14 +103,15 @@ STYLE = {
 }
 
 
-def line(ax, rows, field, x, label, color, log_floor=None):
+def line(ax, rows, field, x, label, color, log_floor=None, band_floor=None):
     rows = sorted(rows,key=x)
     xs = [x(r) for r in rows]
     means = np.array([r[field]['mean'] for r in rows])
     stds = np.array([r[field]['std'] for r in rows])
     bound = field=='bound'
     displayed_means = means if log_floor is None else np.ma.masked_less_equal(means,0)
-    lower = means-stds if log_floor is None else np.maximum(means-stds,log_floor)
+    floor = log_floor if log_floor is not None else band_floor
+    lower = means-stds if floor is None else np.maximum(means-stds,floor)
     upper = means+stds if log_floor is None else np.maximum(means+stds,log_floor)
     ax.plot(xs,displayed_means,linestyle='--' if bound else '-', marker='s' if bound else 'o',
             label=label,color=color,linewidth=1.7,markersize=4,
@@ -153,13 +154,13 @@ def combined_figure(stats, layer):
         left.set_title(f'(a) Fixed prompt length m = 4  ·  n = {steering[0]["error"]["n"]}',loc='left',pad=12)
         left.legend(loc='upper left',bbox_to_anchor=(0,1.01),frameon=False,handlelength=2.6,
                     labelspacing=.45,borderaxespad=.4)
-        line(right,prompt,'error',lambda r:r['m'],'Measured · single-token steering',COLORS['prompt'])
+        line(right,prompt,'error',lambda r:r['m'],'Measured · single-token steering',COLORS['prompt'],band_floor=0)
         format_axis(right,'Appended prompt tokens')
         right.set_ylabel('Raw L₂ error',labelpad=8)
         right.set_title(f'(b) Single-token steering  ·  n = {prompt[0]["error"]["n"]}',loc='left',pad=12)
         right.legend(loc='upper left',frameon=False,handlelength=2.6)
         low,high = right.get_ylim()
-        right.set_ylim(low,high+.13*(high-low))
+        right.set_ylim(0,high+.13*(high-low))
         fig.suptitle(f'Qwen3-4B  /  {label}',x=.085,ha='left',y=.99,fontsize=14,fontweight='bold')
         fig.text(.085,.015,'Mean ± std · raw L₂ differences · left: log scale; bands clipped at positive axis floor',
                  fontsize=9,color='#666666')
@@ -236,7 +237,7 @@ Qwen3-4B, {n} HarmBench inputs; layers 3, 9, 18, 27, 34 (one-based). Two query h
 
 {links}
 
-Each layer has one two-panel PDF: the left panel overlays measured error (solid) and the certified theoretical upper bound (dashed); the right panel shows prompt-length error in purple. The left y-axis is logarithmic and the right y-axis is linear. Standard-deviation bands on the left are clipped at the positive axis floor for display only; raw means and standard deviations are unchanged. A sixth PDF averages the five layers. Open [the plotting notebook](../notebooks/section4_attention_bounds.ipynb) to adjust and regenerate the figures from the tracked summary without rerunning the model. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
+Each layer has one two-panel PDF: the left panel overlays measured error (solid) and the certified theoretical upper bound (dashed); the right panel shows prompt-length error in purple. The left y-axis is logarithmic and the right y-axis is linear. Standard-deviation bands are clipped at the positive axis floor on the left and at zero on the right for display only; raw means and standard deviations are unchanged. A sixth PDF averages the five layers. Open [the plotting notebook](../notebooks/section4_attention_bounds.ipynb) to adjust and regenerate the figures from the tracked summary without rerunning the model. The x-axis uses base-2 logarithmic spacing with explicitly labeled token counts 1, 2, 4, 8, 16, 32, 64, 128.
 
 - Fixed appended prompt length m=4: input-only steering uses the last k input positions. Mixed steering uses four input positions plus g generated positions, with total k+g=4,8,16,32,64,128. Both curves use the **same {len(summary['cohort_indices'])} inputs with at least 128 input tokens**, including the model chat template. No short inputs are padded or silently clamped. The fixed subset's functional categories are {summary['cohort_categories']}; its conclusions do not automatically generalize to the full dataset.
 - Fixed single-token steering k=1: vary the appended prompt length m over the eight token counts, using all {n} inputs. This x-axis is the appended instruction block length, not the HarmBench question length or number of input examples.
