@@ -94,8 +94,9 @@ def trends(stats):
 
 COLORS = {'input':'#2673B8', 'mixed':'#D97721', 'prompt':'#7B4FA3'}
 STYLE = {
-    'font.family':'DejaVu Sans', 'font.size':10, 'axes.titlesize':11,
-    'axes.labelsize':10, 'legend.fontsize':8, 'pdf.fonttype':42,
+    'font.family':'DejaVu Sans', 'font.size':12, 'axes.titlesize':13,
+    'axes.labelsize':13, 'legend.fontsize':10.5,
+    'xtick.labelsize':12, 'ytick.labelsize':12, 'pdf.fonttype':42,
     'axes.spines.top':False, 'axes.spines.right':False,
     'axes.edgecolor':'#999999', 'axes.linewidth':.7,
     'xtick.color':'#444444', 'ytick.color':'#444444',
@@ -123,7 +124,7 @@ def line(ax, rows, field, x, label, color, log_floor=None, band_floor=None):
 def format_axis(ax, xlabel):
     ax.set_xscale('log',base=2)
     ax.set_xticks(LENGTHS,labels=[str(x) for x in LENGTHS])
-    ax.set_xlabel(xlabel,labelpad=8)
+    ax.set_xlabel(xlabel,labelpad=5)
     ax.grid(axis='y',color='#E6E8EB',linewidth=.65)
     ax.set_axisbelow(True)
     ax.margins(x=.04)
@@ -136,7 +137,7 @@ def combined_figure(stats, layer):
     prompt = [r for r in stats if r['layer']==layer and r['figure']=='prompt']
     label = 'Five-layer mean' if layer==-1 else f'Layer {layer+1}'
     with plt.rc_context(STYLE):
-        fig,(left,right) = plt.subplots(1,2,figsize=(11.2,4.5),gridspec_kw={'width_ratios':[1.25,1]})
+        fig,(left,right) = plt.subplots(1,2,figsize=(11.2,3.5),gridspec_kw={'width_ratios':[1.25,1]})
         moments = [r[field] for r in steering for field in ['error','bound']]
         positive = [v for r in moments for v in [r['mean'],r['mean']-r['std']] if v>0]
         low = min(positive)/1.8
@@ -150,14 +151,14 @@ def combined_figure(stats, layer):
             for field,kind in [('error','Measured'),('bound','Bound')]:
                 line(left,rows,field,lambda r:r['k']+r['g'],f'{kind} · {name}',color,log_floor=low)
         format_axis(left,'Steered positions')
-        left.set_ylabel('Raw L₂ error / bound (log scale)',labelpad=8)
-        left.text(.5,-.30,'(a)',transform=left.transAxes,ha='center',va='top',fontsize=11)
-        left.legend(loc='upper left',bbox_to_anchor=(0,1.01),frameon=False,handlelength=2.6,
-                    labelspacing=.45,borderaxespad=.4)
+        left.set_ylabel('Raw L₂ error / bound (log scale)',labelpad=5)
+        left.text(.5,-.30,'(a)',transform=left.transAxes,ha='center',va='top',fontsize=12)
+        left.legend(loc='upper left',bbox_to_anchor=(0,1.01),frameon=False,handlelength=2.,
+                    ncol=2,columnspacing=1.,labelspacing=.3,borderaxespad=.4)
         line(right,prompt,'error',lambda r:r['m'],'Measured · single-token steering',COLORS['prompt'],band_floor=0)
         format_axis(right,'Appended prompt tokens')
-        right.set_ylabel('Raw L₂ error',labelpad=8)
-        right.text(.5,-.30,'(b)',transform=right.transAxes,ha='center',va='top',fontsize=11)
+        right.set_ylabel('Raw L₂ error',labelpad=5)
+        right.text(.5,-.30,'(b)',transform=right.transAxes,ha='center',va='top',fontsize=12)
         right.legend(loc='upper left',frameon=False,handlelength=2.6)
         low,high = right.get_ylim()
         right.set_ylim(0,high+.13*(high-low))
