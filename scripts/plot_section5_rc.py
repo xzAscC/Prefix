@@ -119,6 +119,10 @@ def figure(groups, length_groups, study, complete):
             axes[row,2].set_xticks(x, [str(g['k']) if g['k']>0 else 'Full' for g in length_series])
             axes[row,2].set_xlabel('Steered input tokens (m=8, α=1)')
             axes[row,2].set_title(f'Matched cohort: n={length_series[0]["n"]}')
+        else:
+            axes[row,2].text(.5, .5, 'No eligible behaviors yet\n(input length ≥ 64)',
+                             ha='center', va='center', transform=axes[row,2].transAxes)
+            axes[row,2].set_xlabel('Steered input tokens (m=8, α=1)')
     axes[0,0].legend(fontsize=9)
     axes[0,1].legend(fontsize=9)
     fig.suptitle(f'{study.capitalize()} · layer 17 / head 0 · prediction step 128' + ('' if complete else ' · PARTIAL'))
