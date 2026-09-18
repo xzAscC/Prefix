@@ -66,15 +66,21 @@ def test_layer_mean_uses_paired_inputs_before_computing_std():
         assert row['bound']['mean']==pytest.approx(130.3)
 
 
-def test_combined_figure_has_shared_error_bound_axis_and_prompt_panel():
+@pytest.mark.parametrize('error_std', [.5, 3.])
+def test_combined_figure_has_shared_error_bound_axis_and_prompt_panel(error_std):
     stats = [dict(layer=2,figure=figure,m=m,k=k,g=g,
-                  error=dict(mean=2.,std=.5,n=95 if figure=='steering' else 400),
+                  error=dict(mean=2.,std=error_std,n=95 if figure=='steering' else 400),
                   bound=dict(mean=5.,std=1.,n=95 if figure=='steering' else 400))
              for figure,m,k,g in [('steering',4,1,0),('steering',4,4,0),
                                    ('steering',4,4,4),('prompt',1,1,0),('prompt',4,1,0)]]
     fig = module.combined_figure(stats,2)
     left,right = fig.axes
     assert len(fig.axes)==2
+    assert left.get_yscale()=='log'
+    assert right.get_yscale()=='linear'
+    assert left.get_ylim()[0]>0
+    for band in left.collections:
+        assert all((path.vertices[:,1]>0).all() for path in band.get_paths())
     measured = [line for line in left.lines if 'Measured' in line.get_label()]
     bounds = [line for line in left.lines if 'Bound' in line.get_label()]
     assert len(measured)==len(bounds)==2
