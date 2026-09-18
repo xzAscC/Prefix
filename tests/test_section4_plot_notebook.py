@@ -32,6 +32,21 @@ for ax, label in ((left, '(a)'), (right, '(b)')):
     assert captions[0].get_ha() == 'center'
     assert captions[0].get_position()[0] == .5
     assert captions[0].get_position()[1] < 0
+# Verify the rendered position, not just the axes-coordinate value.
+fig.canvas.draw()
+renderer = fig.canvas.get_renderer()
+for ax, label in ((left, '(a)'), (right, '(b)')):
+    caption = next(item for item in ax.texts if item.get_text() == label)
+    box = caption.get_window_extent(renderer)
+    xlabel_box = ax.xaxis.label.get_window_extent(renderer)
+    assert box.y1 < xlabel_box.y0
+    assert abs((box.x0 + box.x1)/2 - ax.get_window_extent(renderer).x0
+               - ax.get_window_extent(renderer).width/2) < 1
+# Finalization must correct stale top titles, including a formerly left-aligned title.
+left.set_title('(a)', loc='left')
+right.set_title('(b)')
+finalize_panel_labels(fig)
+assert left.get_title(loc='left') == right.get_title() == ''
 assert right.get_ylim()[0] == 0
 assert all((path.vertices[:, 1] >= 0).all()
            for band in right.collections for path in band.get_paths())
