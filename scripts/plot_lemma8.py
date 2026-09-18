@@ -93,9 +93,13 @@ def plot(rows,layer,complete):
             ax.plot(x,y,'o-',label=name,markersize=4)
             ax.fill_between(x,np.maximum(0,y-sd),y+sd,alpha=.12)
         ax.set_xlabel(label);ax.set_ylabel('Attention output L2 distance');ax.grid(alpha=.2)
+        ax.set_yscale('symlog',linthresh=.1,linscale=.5)
+        ax.set_ylim(bottom=0)
         if field in ('g','m','k'):
             ax.set_xscale('symlog',base=2,linthresh=1)
             ax.set_xticks(x,[str(v) for v in x])
+            if x:
+                ax.set_xlim(-.1 if x[0]==0 else x[0]*.85,x[-1]*1.1)
     axes[0,0].legend(fontsize=9)
     title='All layers' if layer==-1 else f'Layer {layer} (zero-based)'
     fig.suptitle(f'Lemma 8 · {title} · prediction step 128'+('' if complete else ' · PARTIAL'))
@@ -117,21 +121,42 @@ def main():
         status['reference_trace']={k:v for k,v in trace.items() if k!='examples'}
         layers=sorted({r['layer'] for r in rows})
         stats={}
+        condition_stats={}
         for layer in [-1,*layers]:
             subset=rows if layer==-1 else [r for r in rows if r['layer']==layer]
             stats[str(layer)]={str(e):low_share_statistics(subset,e) for e in [.001,.01,.05,.1]}
+            grouped=defaultdict(list)
+            for row in subset:
+                grouped[row['id']].append(row)
+            condition_stats[str(layer)]=[
+                {**{k:group[0][k] for k in ['id','m','k','g','alpha','schedule']},
+                 **{field:mean_std(group,field) for field in ['error','bound_shares','bound_score','w_short','w_long','diameter_short']}}
+                for key,group in sorted(grouped.items())]
             plot(subset,layer,status['complete'])
-        write_json_atomic(ROOT/'results/lemma8_summary.json',{**status,'low_share':stats})
+        write_json_atomic(ROOT/'results/lemma8_summary.json',{**status,'low_share':stats,'conditions':condition_stats,
+                          'numerical_tolerance':'1e-8 * max(1, D_short, norm(value_shift))',
+                          'max_identity_residual':max(r['identity_residual'] for r in rows),
+                          'max_positive_bound_excess':max(0.,max(r['error']-r['bound_shares'] for r in rows))})
         report=['# Lemma 8: prefix versus longer steering','',
                 f'{status["completed_examples"]}/{args.limit} complete examples; {len(rows)} eligible head/condition measurements; zero violations.', '',
                 'Both schedules share the query, original keys/values and the same scaled displacement. The long support contains the short support. Replays use the Section 4 linear-head convention before QK normalization and RoPE, at the query predicting token 128; no independent-generation claim follows.', '',
                 f'The shared continuation is already past EOS in {trace["past_eos_examples"]}/{trace["total_examples"]} examples at this prediction step; these are fixed-state diagnostics, not natural response-end measurements.', '',
                 'The first bound uses the diameter of ALL short-schedule values, including modified and unmodified positions. Attention shares are normalized over ALL visible tokens. The score bound uses the absolute added score, not query drift. The same displacement is constructed at the last input token and is reused when support changes.', '',
-                'Figures show mean ± sample standard deviation after averaging heads (and layers in the mean figure) within each behavior. Input-support comparisons use a fixed cohort with at least 64 input tokens. The conditional table excludes zero-strength and empty-extra-set cases.', '',
+                'Y axes use a symmetric-log scale with a linear region below 0.1 to retain exact-zero controls. Figures show mean ± sample standard deviation after averaging heads (and layers in the mean figure) within each behavior. Input-support comparisons use a fixed cohort with at least 64 input tokens. The conditional table excludes zero-strength and empty-extra-set cases.', '',
                 '| ε (both shares ≤ ε) | Eligible conditions | Behaviors | Mean difference | Mean ε bound | Violations |',
                 '|---|---:|---:|---:|---:|---:|']
         for item in stats['-1'].values():
             report.append(f'| {item["epsilon"]} | {item["conditions"]} | {item["error"]["n"]} | {item["error"]["mean"]} | {item["bound"]["mean"]} | {item["violations"]} |')
+        report += ['', '## Main schedule comparisons (m=8, α=1)', '',
+                   '| Short support → long support | Behaviors | Mean difference | Mean share bound | Mean score bound |',
+                   '|---|---:|---:|---:|---:|']
+        labels={'m8_k1_g127_a1_generated':'1 input → same input + 127 generated',
+                'm8_k1_g127_a1_full':'1 input → all input + 127 generated',
+                'm8_k-1_g127_a1_full':'All input → all input + 127 generated'}
+        for item in condition_stats['-1']:
+            if item['id'] in labels:
+                report.append(f'| {labels[item["id"]]} | {item["error"]["n"]} | {item["error"]["mean"]:.6g} | {item["bound_shares"]["mean"]:.6g} | {item["bound_score"]["mean"]:.6g} |')
+        report += ['', 'All bounds are checked with tolerance 1e-8 × max(1, D_short, value-shift norm). Token count alone does not imply a monotone difference; value and weight contributions can cancel.']
         (ROOT/'results/lemma8_report.md').write_text('\n'.join(report)+'\n')
 
 
