@@ -143,6 +143,7 @@ def main():
                   'R = cos(output, unsteered output); C = cos(output, fixed reference direction).',
                   'The direction is the m=8 first-step constructed value displacement, fixed across methods, prompt lengths and strengths within each example/head. It measures prompt alignment, not a separately validated safety concept.', '',
                   'Prediction step 128 uses the query at generated token 127. Fixed replay excludes token 128 and all unused prompt positions. The linear replay precedes QK normalization and RoPE and shares the original eight-token-prompt continuation. Native generation uses each method\'s own trajectory with the model\'s native operations.', '',
+                  'Layer/head indices are zero-based: layer 17 is the eighteenth transformer block.', '',
                   'Full steering applies the same last-input-token-constructed displacement to all input and visible generated positions. Prefix-length sweeps apply that same displacement to the last k input positions. Native runs intervene after input normalization at layer 17; head 0 is the prespecified primary measurement.', '',
                   'Numerically zero concept directions retain R and mark C and concept-dependent quantities undefined. Per-metric sample counts and undefined counts are stored explicitly.', '',
                   'Intervals are percentile 95% bootstrap intervals over behaviors (2,000 resamples, seed 42). Head observations are never counted as independent behaviors. EOS is ignored to reach 128 tokens, and continuation after EOS is counted explicitly.', '']
@@ -158,6 +159,7 @@ def main():
             length_groups = summarize([r for r in rows if r['index'] in cohort and r['m']==8
                                         and r['method'] in ('single','prefix','full')])
             summary[study] = {**status, 'groups': groups, 'input_length_matched_cohort': length_groups}
+            write_json_atomic(ROOT / f'results/section5_{study}_summary.json', summary[study])
             report += [f'## {study}: {status["completed_examples"]}/{args.limit} complete examples', '',
                        '| Method (m=8, α=1) | n | R | C | ΔC | Continued after EOS |',
                        '|---|---:|---:|---:|---:|---:|']
