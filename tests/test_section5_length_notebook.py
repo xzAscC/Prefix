@@ -30,6 +30,11 @@ assert all(ax.lines[2].get_label() == 'Unsteered' for ax in fig.axes)
 assert all(ax.lines[0].get_label() == 'Steering' for ax in fig.axes)
 assert all(len(ax.lines[0].get_xdata()) == 5 for ax in fig.axes)
 assert all(ax.get_xticklabels()[-1].get_text() == 'Full' for ax in fig.axes)
+assert list(steering) == [1, 4, 16, 64, 'Full']
+assert all(set(steering[k][field]) >= {'mean', 'std', 'lower', 'upper'}
+           for k in steering for field in ('R', 'C'))
+assert all(list(ax.lines[0].get_ydata()) == [steering[k][field]['mean'] for k in steering]
+           for ax, field in zip(fig.axes, ('R', 'C')))
 assert all(ax.lines[1].get_ydata()[0] == baseline['prompt'][field]['mean']
            for ax, field in zip(fig.axes, ('R', 'C')))
 assert all(ax.lines[2].get_ydata()[0] == baseline['unsteered'][field]['mean']
