@@ -3,15 +3,18 @@ from pathlib import Path
 
 import nbformat
 from nbclient import NotebookClient
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
 
 
-def test_section5_length_notebook(tmp_path):
+@pytest.mark.parametrize('start_in_notebooks', [False, True])
+def test_section5_length_notebook(tmp_path, start_in_notebooks):
     notebook = nbformat.read(ROOT / 'notebooks/section5_input_length.ipynb', as_version=4)
     (tmp_path / 'results').mkdir()
     (tmp_path / 'figs').mkdir()
+    (tmp_path / 'notebooks').mkdir()
     (tmp_path / 'results/section5_fixed_summary.json').write_bytes(
         (ROOT / 'results/section5_fixed_summary.json').read_bytes())
     for path in (ROOT / 'results').glob('section5_fixed_[0-9][0-9][0-9].json'):
@@ -31,4 +34,4 @@ assert all(ax.lines[1].get_ydata()[0] == baseline[field]['mean']
 assert (ROOT / 'figs/section5_input_length.pdf').read_bytes().startswith(b'%PDF')
 """))
     NotebookClient(notebook, timeout=120, kernel_name='python3',
-                   resources={'metadata': {'path': str(tmp_path)}}).execute()
+                   resources={'metadata': {'path': str(tmp_path / 'notebooks' if start_in_notebooks else tmp_path)}}).execute()
