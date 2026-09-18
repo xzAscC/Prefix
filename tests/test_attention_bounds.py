@@ -94,3 +94,12 @@ def test_jacobian_anchor_is_the_designated_input_token_not_block_order():
     reordered = evaluate(keys, values, q0, q, [2, 0, 1], [6, 7], [10], wk @ r, wv @ r)
     assert row['jacobian_upper'] == pytest.approx(reordered['jacobian_upper'])
     assert row['jacobian_sample'] == pytest.approx(reordered['jacobian_sample'])
+
+
+@pytest.mark.parametrize('offset', [0.0, 1e10])
+def test_diameter_matches_direct_distances_for_large_translated_clouds(offset):
+    from prefix.attention_bounds import diameter
+    rng = np.random.default_rng(813)
+    values = rng.normal(size=(555, 9)) + offset
+    expected = np.linalg.norm(values[:,None] - values[None], axis=-1).max()
+    assert diameter(values) == pytest.approx(expected, rel=1e-13)

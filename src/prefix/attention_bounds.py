@@ -22,15 +22,21 @@ def logsumexp(x):
     return float(maximum + np.log(np.exp(x - maximum).sum()))
 
 
-def diameter(values):
-    if len(values) < 2:
-        return 0.0
-    # Direct differences avoid cancellation for equal values.
+def maximum_distance(left, right):
+    """Largest cross distance, using centered Gram products to bound memory."""
+    origin = right[0]
+    left, right = left - origin, right - origin
+    right_norms = np.sum(right * right, axis=1)
     largest = 0.0
-    for start in range(0, len(values), 32):
-        largest = max(largest, float(np.max(np.sum(
-            (values[start:start + 32, None] - values[None]) ** 2, axis=-1))))
+    for start in range(0, len(left), 256):
+        part = left[start:start + 256]
+        squared = np.sum(part * part, axis=1)[:, None] + right_norms[None] - 2 * (part @ right.T)
+        largest = max(largest, float(squared.max()))
     return np.sqrt(largest)
+
+
+def diameter(values):
+    return 0.0 if len(values) < 2 else maximum_distance(values, values)
 
 
 def construct_shift(h, wk, wv, q0, selected, prompt, null_vector=None):
@@ -105,7 +111,7 @@ def evaluate(keys, values, q0, q, selected, prompt, shared, key_shift, value_shi
     os = softmax(np.concatenate([scores[shared], scores[selected] + shift])) @ steer_values
     modified = values[selected] + value_shift
     base_d = diameter(prompt_values) if original_diameter is None else original_diameter
-    cross_d = np.sqrt(np.max(np.sum((modified[:, None] - prompt_values[None]) ** 2, axis=-1)))
+    cross_d = maximum_distance(modified, prompt_values)
     d = max(base_d, cross_d, diameter(modified))
     ev, ew = ws * (vs - vp), (ws - wp) * (vp - context)
     ek = float(np.max(np.abs((scores - scores0)[block, None] - (scores - scores0)[selected])))
