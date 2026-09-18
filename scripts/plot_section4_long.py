@@ -151,20 +151,20 @@ def combined_figure(stats, layer):
                 line(left,rows,field,lambda r:r['k']+r['g'],f'{kind} · {name}',color,log_floor=low)
         format_axis(left,'Steered positions')
         left.set_ylabel('Raw L₂ error / bound (log scale)',labelpad=8)
-        left.set_title(f'(a) Fixed prompt length m = 4  ·  n = {steering[0]["error"]["n"]}',loc='left',pad=12)
+        left.text(.5,-.30,'(a)',transform=left.transAxes,ha='center',va='top',fontsize=11)
         left.legend(loc='upper left',bbox_to_anchor=(0,1.01),frameon=False,handlelength=2.6,
                     labelspacing=.45,borderaxespad=.4)
         line(right,prompt,'error',lambda r:r['m'],'Measured · single-token steering',COLORS['prompt'],band_floor=0)
         format_axis(right,'Appended prompt tokens')
         right.set_ylabel('Raw L₂ error',labelpad=8)
-        right.set_title(f'(b) Single-token steering  ·  n = {prompt[0]["error"]["n"]}',loc='left',pad=12)
+        right.text(.5,-.30,'(b)',transform=right.transAxes,ha='center',va='top',fontsize=11)
         right.legend(loc='upper left',frameon=False,handlelength=2.6)
         low,high = right.get_ylim()
         right.set_ylim(0,high+.13*(high-low))
         fig.suptitle(f'Qwen3-4B  /  {label}',x=.085,ha='left',y=.99,fontsize=14,fontweight='bold')
         fig.text(.085,.015,'Mean ± std · raw L₂ differences · left: log scale; bands clipped at positive axis floor',
                  fontsize=9,color='#666666')
-        fig.subplots_adjust(left=.085,right=.985,bottom=.18,top=.80,wspace=.32)
+        fig.subplots_adjust(left=.085,right=.985,bottom=.28,top=.90,wspace=.32)
     return fig
 
 

@@ -76,6 +76,13 @@ def test_combined_figure_has_shared_error_bound_axis_and_prompt_panel(error_std)
     fig = module.combined_figure(stats,2)
     left,right = fig.axes
     assert len(fig.axes)==2
+    for ax,label in [(left,'(a)'),(right,'(b)')]:
+        assert ax.get_title()==''
+        captions=[item for item in ax.texts if item.get_text()==label]
+        assert len(captions)==1
+        assert captions[0].get_ha()=='center'
+        assert captions[0].get_position()[0]==.5
+        assert captions[0].get_position()[1]<0
     assert left.get_yscale()=='log'
     assert right.get_yscale()=='linear'
     assert right.get_ylim()[0] == 0

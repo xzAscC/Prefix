@@ -24,7 +24,14 @@ def test_notebook_draws_without_importing_plot_script(tmp_path):
     (tmp_path / 'logs').mkdir()
     notebook.cells.append(nbformat.v4.new_code_cell("""
 fig = combined_figure(-1)
-right = fig.axes[1]
+left, right = fig.axes
+for ax, label in ((left, '(a)'), (right, '(b)')):
+    assert ax.get_title() == ''
+    captions = [item for item in ax.texts if item.get_text() == label]
+    assert len(captions) == 1
+    assert captions[0].get_ha() == 'center'
+    assert captions[0].get_position()[0] == .5
+    assert captions[0].get_position()[1] < 0
 assert right.get_ylim()[0] == 0
 assert all((path.vertices[:, 1] >= 0).all()
            for band in right.collections for path in band.get_paths())
