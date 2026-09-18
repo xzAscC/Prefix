@@ -238,7 +238,7 @@ The report, summary, comparison CSV, manifest, and two PDF figures are retained 
     (ROOT / 'results/section4_report.md').write_text(text)
     write_json_atomic(ROOT / 'results/section4_summary.json', summary)
     with (ROOT / 'results/section4_error_comparison.csv').open('w') as output:
-        writer = csv.DictWriter(output, fieldnames=['setting','m','k','g','n_prompts','error_mean','error_std','bound_mean','bound_std'])
+        writer = csv.DictWriter(output, fieldnames=['setting','m','k','g','n_prompts','error_mean','error_std','bound_mean','bound_std'], lineterminator='\n')
         writer.writeheader()
         for r in stats:
             writer.writerow({**{k:r[k] for k in ['setting','m','k','g']}, 'n_prompts':r['error']['n'],
