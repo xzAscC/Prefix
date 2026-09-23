@@ -14,17 +14,17 @@ def test_toy_plot_is_standalone_and_preserves_values(tmp_path):
     notebook.cells.append(nbformat.v4.new_code_cell('''
 assert len(fig.axes) == 1
 assert len(DATA) == 14
-assert next(row[2:] for row in DATA if row[:2] == ('All-token', 10)) == (22.042, 98.317)
+assert next(row[2:] for row in DATA if row[:2] == ('Full', 10)) == (22.042, 98.317)
 assert next(row[2:] for row in DATA if row[:2] == ('Prefix-1', 10)) == (38.813, 83.127)
 assert ax.get_xscale() == 'function'
 import numpy as np
 values = np.array([20, 22, 22.042, 32.487, 34, 37, 39.3, 41])
 np.testing.assert_allclose(expand_x(compress_x(values)), values)
 assert np.all(np.diff(compress_x(values)) > 0)
-assert compress_x(34) - compress_x(22) < 2
+assert compress_x(34) - compress_x(22) < 0.6
 np.testing.assert_allclose(compress_x(39) - compress_x(37), 2)
-assert ax.get_xlabel() == 'General ability'
-assert ax.get_ylabel() == 'Steering performance'
+assert ax.get_xlabel() == 'General Ability'
+assert ax.get_ylabel() == 'Steering Performance'
 assert ax.get_xlim()[0] <= min(row[2] for row in DATA)
 assert ax.get_xlim()[1] >= max(row[2] for row in DATA)
 for collection, name in zip(ax.collections, STYLES):
