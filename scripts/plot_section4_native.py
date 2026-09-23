@@ -166,8 +166,14 @@ def figures(stats, drift, controls, n, suffix=''):
             group = [r for r in controls if r['control']==control]
             line(axes[2],group,lambda r:r['count'],'dimension',label,color)
         for ax,label in zip(axes,['Steered tokens','Prompt tokens','Controlled prompt-key count']):
-            token_axis(ax,label)
+            ax.set_xlabel(label)
+            ax.set_xscale('linear')
+            ax.set_yscale('linear')
+            ax.set_xticks([0,32,64,96,128])
+            ax.set_yticks([0,32,64,96,128])
+            ax.set_xlim(-3,131)
             ax.set_ylim(-3,131)
+            ax.grid(axis='y',alpha=.2)
             ax.set_ylabel('Dimension of original linear U⊥')
             ax.legend(frameon=False)
         fig.suptitle('Linear key-space diagnostic; fixed value-null direction within each example/head',fontsize=13)

@@ -51,11 +51,15 @@ def test_log_panel_remains_readable_when_standard_deviation_crosses_zero(monkeyp
              for c in module.conditions()]
     limits = []
     distance_scales = []
+    dimension_axes = []
     def capture(fig, name):
         if name == 'section4_native_token_error':
             limits.append(fig.axes[0].get_ylim())
         if name == 'section4_native_distance_error':
             distance_scales.extend(ax.get_yscale() for ax in fig.axes)
+        if name == 'section4_native_subspace':
+            dimension_axes.extend((ax.get_xscale(), ax.get_yscale(),
+                                   list(ax.get_xticks()), list(ax.get_yticks())) for ax in fig.axes)
         module.plt.close(fig)
     monkeypatch.setattr(module, 'save', capture)
     controls = [dict(control=name,count=count,dimension={'mean':120.,'std':0.})
@@ -65,3 +69,7 @@ def test_log_panel_remains_readable_when_standard_deviation_crosses_zero(monkeyp
     assert .001 < lower < .1
     assert upper >= .3
     assert distance_scales == ['log'] * 4
+    assert len(dimension_axes) == 3
+    for xscale, yscale, xticks, yticks in dimension_axes:
+        assert xscale == yscale == 'linear'
+        assert xticks == yticks == [0, 32, 64, 96, 128]
