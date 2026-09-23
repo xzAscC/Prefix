@@ -147,6 +147,7 @@ def figures(stats, drift, controls, n, suffix=''):
                 line(ax,rows,lambda r:0 if r['rho']['mean'] < 1e-9 else r['rho']['mean'],
                      'native_error',direction,COLORS[direction],band=False)
             ax.set_xscale('symlog',linthresh=.01)
+            ax.set_yscale('log')
             ax.set_xlabel('Distance ρ to original linear U⊥')
             ax.set_ylabel('Native attention L₂ error')
             ax.set_title(title,fontsize=11)

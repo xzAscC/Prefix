@@ -50,9 +50,12 @@ def test_log_panel_remains_readable_when_standard_deviation_crosses_zero(monkeyp
     stats = [{**c, 'common':{'mean':.1,'std':.2}, 'dimension':{'mean':120.,'std':0.}}
              for c in module.conditions()]
     limits = []
+    distance_scales = []
     def capture(fig, name):
         if name == 'section4_native_token_error':
             limits.append(fig.axes[0].get_ylim())
+        if name == 'section4_native_distance_error':
+            distance_scales.extend(ax.get_yscale() for ax in fig.axes)
         module.plt.close(fig)
     monkeypatch.setattr(module, 'save', capture)
     controls = [dict(control=name,count=count,dimension={'mean':120.,'std':0.})
@@ -61,3 +64,4 @@ def test_log_panel_remains_readable_when_standard_deviation_crosses_zero(monkeyp
     lower, upper = limits[0]
     assert .001 < lower < .1
     assert upper >= .3
+    assert distance_scales == ['log'] * 4
