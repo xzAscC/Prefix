@@ -7,6 +7,7 @@ All outputs have independent names; legacy experiment artifacts are read-only.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import json
@@ -43,6 +44,26 @@ def file_digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             checksum.update(block)
     return checksum.hexdigest()
+
+
+def analysis_fingerprint(source):
+    names = {'analyze', 'drift_study', 'controlled_dimensions'}
+    functions = [ast.dump(node, include_attributes=False) for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef) and node.name in names]
+    if len(functions) != len(names):
+        raise ValueError('incomplete analysis implementation')
+    return digest(functions)
+
+
+def resume_batch(path, identity, rows, completed):
+    batch = identity['indices']
+    state = json.loads(path.read_text()) if path.exists() else dict(identity=identity,
+        tokens=[rows[i]['seed_generated_ids'].copy() for i in batch])
+    pending = [i for i in batch if i not in completed]
+    tokens = [state['tokens'][batch.index(i)] for i in pending]
+    if state['identity'] != identity or (tokens and len({len(x) for x in tokens}) != 1):
+        raise ValueError('decoding checkpoint mismatch')
+    return state, pending, tokens
 
 
 def choose_examples(lengths, count):
@@ -184,29 +205,24 @@ def extract(config, cohort, indices, batch_size, device):
                 t = time.monotonic()
                 identity = dict(cohort=cohort['fingerprint'], indices=batch, generated=config['generated_tokens'])
                 journal = ROOT / f'checkpoints/section4_native_decode_{digest(identity)[:16]}.json'
-                state = json.loads(journal.read_text()) if journal.exists() else dict(identity=identity,
-                    tokens=[rows[i]['seed_generated_ids'].copy() for i in batch])
-                if state['identity'] != identity or len({len(x) for x in state['tokens']}) != 1:
-                    raise ValueError('decoding checkpoint mismatch')
-                prefixes = [rows[i]['base_ids'] + rows[i]['prompt_ids'][:config['generation_prompt_tokens']] for i in batch]
-                ids, mask, positions = padded([p+t for p,t in zip(prefixes,state['tokens'])])
+                state, pending, tokens_by_example = resume_batch(journal,identity,rows,set(done))
+                prefixes = [rows[i]['base_ids'] + rows[i]['prompt_ids'][:config['generation_prompt_tokens']] for i in pending]
+                ids, mask, positions = padded([p+t for p,t in zip(prefixes,tokens_by_example)])
                 cache = None
-                while len(state['tokens'][0]) < config['generated_tokens']:
+                while len(tokens_by_example[0]) < config['generated_tokens']:
                     out = model(ids, attention_mask=mask, position_ids=positions, past_key_values=cache,
                                 use_cache=True, logits_to_keep=1)
                     cache = out.past_key_values
                     new = out.logits[:,-1].argmax(-1)
-                    for tokens, token in zip(state['tokens'], new.tolist()):
+                    for tokens, token in zip(tokens_by_example, new.tolist()):
                         tokens.append(token)
                     write_json_atomic(journal, state)
                     ids = new[:,None]
-                    mask = torch.cat([mask, torch.ones((len(batch),1), device=device, dtype=mask.dtype)], -1)
+                    mask = torch.cat([mask, torch.ones((len(pending),1), device=device, dtype=mask.dtype)], -1)
                     positions = mask.sum(-1, keepdim=True) - 1
                 del cache, ids, mask, positions
-                captures = capture([p+t for p,t in zip(prefixes,state['tokens'])])
-                for j,index in enumerate(batch):
-                    if index in done:
-                        continue
+                captures = capture([p+t for p,t in zip(prefixes,tokens_by_example)])
+                for j,index in enumerate(pending):
                     meta = rows[index]
                     n = meta['input_tokens']
                     seed = load_tensor(ROOT / f'checkpoints/section4_native_seed_{index:03d}.pt')
@@ -216,7 +232,7 @@ def extract(config, cohort, indices, batch_size, device):
                     generation_h = captures[j]
                     hidden = torch.cat([generation_h[:n], prompt_h,
                                         generation_h[n+config['generation_prompt_tokens']:]], 0)
-                    tokens = state['tokens'][j]
+                    tokens = tokens_by_example[j]
                     first_eos = next((k+1 for k,token in enumerate(tokens) if token in stop_ids), None)
                     payload = dict(fingerprint=meta['fingerprint'], index=index, hidden=hidden,
                                    generated_ids=tokens, first_eos=first_eos, stop_ids=stop_ids,
@@ -234,7 +250,7 @@ def identity_for(cohort, index, head, condition, config):
     return dict(version=1, cohort=cohort['fingerprint'], index=index, head=head, condition=condition,
                 layer=config['layer'], fit_steps=config['max_fit_steps'], fit_tolerance=config['fit_tolerance'],
                 native_implementation_sha256=file_digest(ROOT / 'src/prefix/native_attention.py'),
-                runner_sha256=file_digest(Path(__file__)))
+                analysis_sha256=analysis_fingerprint(Path(__file__).read_text()))
 
 
 def drift_study(study, c, r, identity, path, config):

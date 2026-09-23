@@ -216,9 +216,9 @@ def main():
             max_reference_error=max(fit_errors),median_reference_error=float(np.median(fit_errors)),
             unconverged_fits=sum(not r['fit']['converged'] for r in rows),
             reference_error_above_1e_5=sum(e>1e-5 for e in fit_errors),
-            source_hashes=sorted({r['identity']['runner_sha256'] for r in rows}),
+            analysis_hashes=sorted({r['identity']['analysis_sha256'] for r in rows}),
             token_statistics=stats,drift_statistics=drift_stats,controlled_dimensions=controls)
-        if len(summary['source_hashes']) != 1:
+        if len(summary['analysis_hashes']) != 1:
             raise ValueError('mixed runner implementations')
         write_json_atomic(ROOT/f'results/section4_native_summary{suffix}.json',summary)
         figures(stats,drift_stats,controls,len(indices),suffix)

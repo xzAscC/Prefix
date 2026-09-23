@@ -40,6 +40,24 @@ def test_native_manifest_changes_when_scientific_settings_change():
     assert module.digest(config) != module.digest({**config, 'generated_tokens':128})
 
 
+def test_partial_batch_reuses_per_example_progress_without_completed_members(tmp_path):
+    rows = {1:{'seed_generated_ids':[1]},2:{'seed_generated_ids':[2]},3:{'seed_generated_ids':[3]}}
+    path = tmp_path / 'decode.json'
+    identity = {'cohort':'test','indices':[1,2,3]}
+    path.write_text(__import__('json').dumps({'identity':identity,'tokens':[[1,9],[2,8],[3,7]]}))
+    state, pending, tokens = module.resume_batch(path,identity,rows,completed={1})
+    assert pending == [2,3]
+    assert tokens == [[2,8],[3,7]]
+    tokens[0].append(6)
+    assert state['tokens'][1] == [2,8,6]
+
+
+def test_analysis_fingerprint_is_independent_of_extraction_only_changes():
+    source = Path(module.__file__).read_text()
+    assert module.analysis_fingerprint(source) == module.analysis_fingerprint(source.replace('def extract(', 'def renamed_extract('))
+    assert module.analysis_fingerprint(source) != module.analysis_fingerprint(source.replace('base_d = diameter(', 'base_d = 2 * diameter('))
+
+
 def test_result_validation_rejects_missing_and_misassigned_queries():
     row = {'identity': {'index':1}, 'queries':[3,4], 'errors':[.1,.2], 'complete':True}
     module.validate_result(row, {'index':1}, [3,4])
