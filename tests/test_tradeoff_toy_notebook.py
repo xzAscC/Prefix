@@ -16,8 +16,12 @@ assert len(fig.axes) == 1
 assert len(DATA) == 14
 assert next(row[2:] for row in DATA if row[:2] == ('All-token', 10)) == (22.042, 98.317)
 assert next(row[2:] for row in DATA if row[:2] == ('Prefix-1', 10)) == (38.813, 83.127)
-assert ax.get_xlim()[0] <= min(row[2] for row in DATA)
-assert ax.get_xlim()[1] >= max(row[2] for row in DATA)
+assert ax.get_xscale() == 'symlog'
+assert BASELINE == 39.300
+assert ax.get_xlim()[0] <= 0
+assert ax.get_xlim()[1] >= max(BASELINE - row[2] for row in DATA)
+assert len(ax.collections) == 5
+assert not ax.texts  # Strength is encoded in marker size, without colliding labels.
 assert OUTPUT.name == 'steering_tradeoff_7b_toy.pdf'
 '''))
     NotebookClient(notebook, timeout=90, kernel_name='python3',
