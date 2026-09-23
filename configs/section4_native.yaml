@@ -1,0 +1,15 @@
+model: Qwen/Qwen3-4B
+revision: 1cfa9a7208912126459214e8b04321603b3df60c
+layer: 26
+heads: [0, 16]
+sample_count: 100
+minimum_input_tokens: 128
+prompt_slots: 128
+generated_tokens: 256
+generation_prompt_tokens: 8
+batch_size: 4
+max_fit_steps: 100
+fit_tolerance: 0.000001
+rank_rtol: 0.0000001
+drift_scales: [0.0, 0.01, 0.03, 0.1, 0.3, 1.0]
+seed: 20260922
