@@ -121,6 +121,10 @@ def figures(stats, drift, controls, n, suffix=''):
         mixed = [r for r in stats if r['m']==4 and r['b']==1]
         for rows,name,label in [(input_rows,'input','Input only'),(mixed,'mixed','1 input + generated')]:
             line(left,rows,lambda r:r['b']+r['g'],'common',label,COLORS[name])
+        # A standard-deviation band crossing zero has no finite log endpoint.
+        # Keep the mean curves readable; such bands continue below the viewport.
+        left.set_ylim(min(r['common']['mean'] for r in input_rows+mixed)/3,
+                      max(r['common']['mean']+r['common']['std'] for r in input_rows+mixed)*1.2)
         prompt = [r for r in stats if r['b']==1 and r['g']==0]
         line(right,prompt,lambda r:r['m'],'common','Single-token steering',COLORS['prompt'])
         token_axis(left,'Steered tokens'); token_axis(right,'Prompt tokens')
@@ -241,7 +245,7 @@ def main():
         write_json_atomic(ROOT/f'results/section4_native_summary{suffix}.json',summary)
         figures(stats,drift_stats,controls,len(indices),suffix)
         with (ROOT/f'results/section4_native_token_statistics{suffix}.csv').open('w',newline='') as stream:
-            writer = csv.writer(stream)
+            writer = csv.writer(stream, lineterminator='\n')
             writer.writerow(['m','input_steered','generated_steered','n','common_query_error_mean','common_query_error_std',
                              'all_query_error_mean','exposed_query_error_mean','linear_dimension_mean','reference_error_mean'])
             for r in stats:

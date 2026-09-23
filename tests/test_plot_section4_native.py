@@ -44,3 +44,20 @@ def test_eos_audit_counts_behaviors_once_and_marks_post_eos_queries():
     assert audit['common_positions_total'] == 256
     with pytest.raises(ValueError, match='inconsistent EOS'):
         module.trace_statistics(rows + [dict(identity={'index':1},first_eos=99)])
+
+
+def test_log_panel_remains_readable_when_standard_deviation_crosses_zero(monkeypatch):
+    stats = [{**c, 'common':{'mean':.1,'std':.2}, 'dimension':{'mean':120.,'std':0.}}
+             for c in module.conditions()]
+    limits = []
+    def capture(fig, name):
+        if name == 'section4_native_token_error':
+            limits.append(fig.axes[0].get_ylim())
+        module.plt.close(fig)
+    monkeypatch.setattr(module, 'save', capture)
+    controls = [dict(control=name,count=count,dimension={'mean':120.,'std':0.})
+                for name in ['redundant','independent'] for count in module.LENGTHS]
+    module.figures(stats, [], controls, 100)
+    lower, upper = limits[0]
+    assert .001 < lower < .1
+    assert upper >= .3
