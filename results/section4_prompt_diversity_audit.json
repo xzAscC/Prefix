@@ -1,0 +1,924 @@
+{
+  "complete": true,
+  "conditions": 3000,
+  "examples": 100,
+  "heads": [
+    0,
+    16
+  ],
+  "extraction_device": "local RTX 4090, BF16",
+  "rank_device": "local CPU, float64",
+  "remote_job_state": "CANCELLED; allocation released",
+  "per_condition_individual_records": 200,
+  "rank_tolerance_sensitivity": {
+    "1e-05": [
+      {
+        "id": "m1_b1_g0",
+        "family": "prompt",
+        "m": 1,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 126.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          126
+        ]
+      },
+      {
+        "id": "m2_b1_g0",
+        "family": "prompt",
+        "m": 2,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 125.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          125
+        ]
+      },
+      {
+        "id": "m4_b1_g0",
+        "family": "input",
+        "m": 4,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 123.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          123
+        ]
+      },
+      {
+        "id": "m4_b1_g1",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 1,
+        "dimension": {
+          "n": 100,
+          "mean": 122.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          122
+        ]
+      },
+      {
+        "id": "m4_b1_g3",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 3,
+        "dimension": {
+          "n": 100,
+          "mean": 120.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          120
+        ]
+      },
+      {
+        "id": "m4_b1_g7",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 7,
+        "dimension": {
+          "n": 100,
+          "mean": 116.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          116
+        ]
+      },
+      {
+        "id": "m4_b1_g15",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 15,
+        "dimension": {
+          "n": 100,
+          "mean": 108.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          108
+        ]
+      },
+      {
+        "id": "m4_b1_g31",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 31,
+        "dimension": {
+          "n": 100,
+          "mean": 92.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          92
+        ]
+      },
+      {
+        "id": "m4_b1_g63",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 63,
+        "dimension": {
+          "n": 100,
+          "mean": 60.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          60
+        ]
+      },
+      {
+        "id": "m4_b1_g127",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 127,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      },
+      {
+        "id": "m8_b1_g0",
+        "family": "prompt",
+        "m": 8,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 119.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          119
+        ]
+      },
+      {
+        "id": "m16_b1_g0",
+        "family": "prompt",
+        "m": 16,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 111.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          111
+        ]
+      },
+      {
+        "id": "m32_b1_g0",
+        "family": "prompt",
+        "m": 32,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 95.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          95
+        ]
+      },
+      {
+        "id": "m64_b1_g0",
+        "family": "prompt",
+        "m": 64,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 63.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          63
+        ]
+      },
+      {
+        "id": "m128_b1_g0",
+        "family": "prompt",
+        "m": 128,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      }
+    ],
+    "1e-06": [
+      {
+        "id": "m1_b1_g0",
+        "family": "prompt",
+        "m": 1,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 126.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          126
+        ]
+      },
+      {
+        "id": "m2_b1_g0",
+        "family": "prompt",
+        "m": 2,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 125.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          125
+        ]
+      },
+      {
+        "id": "m4_b1_g0",
+        "family": "input",
+        "m": 4,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 123.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          123
+        ]
+      },
+      {
+        "id": "m4_b1_g1",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 1,
+        "dimension": {
+          "n": 100,
+          "mean": 122.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          122
+        ]
+      },
+      {
+        "id": "m4_b1_g3",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 3,
+        "dimension": {
+          "n": 100,
+          "mean": 120.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          120
+        ]
+      },
+      {
+        "id": "m4_b1_g7",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 7,
+        "dimension": {
+          "n": 100,
+          "mean": 116.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          116
+        ]
+      },
+      {
+        "id": "m4_b1_g15",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 15,
+        "dimension": {
+          "n": 100,
+          "mean": 108.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          108
+        ]
+      },
+      {
+        "id": "m4_b1_g31",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 31,
+        "dimension": {
+          "n": 100,
+          "mean": 92.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          92
+        ]
+      },
+      {
+        "id": "m4_b1_g63",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 63,
+        "dimension": {
+          "n": 100,
+          "mean": 60.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          60
+        ]
+      },
+      {
+        "id": "m4_b1_g127",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 127,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      },
+      {
+        "id": "m8_b1_g0",
+        "family": "prompt",
+        "m": 8,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 119.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          119
+        ]
+      },
+      {
+        "id": "m16_b1_g0",
+        "family": "prompt",
+        "m": 16,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 111.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          111
+        ]
+      },
+      {
+        "id": "m32_b1_g0",
+        "family": "prompt",
+        "m": 32,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 95.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          95
+        ]
+      },
+      {
+        "id": "m64_b1_g0",
+        "family": "prompt",
+        "m": 64,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 63.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          63
+        ]
+      },
+      {
+        "id": "m128_b1_g0",
+        "family": "prompt",
+        "m": 128,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      }
+    ],
+    "1e-07": [
+      {
+        "id": "m1_b1_g0",
+        "family": "prompt",
+        "m": 1,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 126.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          126
+        ]
+      },
+      {
+        "id": "m2_b1_g0",
+        "family": "prompt",
+        "m": 2,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 125.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          125
+        ]
+      },
+      {
+        "id": "m4_b1_g0",
+        "family": "input",
+        "m": 4,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 123.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          123
+        ]
+      },
+      {
+        "id": "m4_b1_g1",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 1,
+        "dimension": {
+          "n": 100,
+          "mean": 122.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          122
+        ]
+      },
+      {
+        "id": "m4_b1_g3",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 3,
+        "dimension": {
+          "n": 100,
+          "mean": 120.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          120
+        ]
+      },
+      {
+        "id": "m4_b1_g7",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 7,
+        "dimension": {
+          "n": 100,
+          "mean": 116.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          116
+        ]
+      },
+      {
+        "id": "m4_b1_g15",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 15,
+        "dimension": {
+          "n": 100,
+          "mean": 108.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          108
+        ]
+      },
+      {
+        "id": "m4_b1_g31",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 31,
+        "dimension": {
+          "n": 100,
+          "mean": 92.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          92
+        ]
+      },
+      {
+        "id": "m4_b1_g63",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 63,
+        "dimension": {
+          "n": 100,
+          "mean": 60.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          60
+        ]
+      },
+      {
+        "id": "m4_b1_g127",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 127,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      },
+      {
+        "id": "m8_b1_g0",
+        "family": "prompt",
+        "m": 8,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 119.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          119
+        ]
+      },
+      {
+        "id": "m16_b1_g0",
+        "family": "prompt",
+        "m": 16,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 111.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          111
+        ]
+      },
+      {
+        "id": "m32_b1_g0",
+        "family": "prompt",
+        "m": 32,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 95.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          95
+        ]
+      },
+      {
+        "id": "m64_b1_g0",
+        "family": "prompt",
+        "m": 64,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 63.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          63
+        ]
+      },
+      {
+        "id": "m128_b1_g0",
+        "family": "prompt",
+        "m": 128,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      }
+    ],
+    "1e-08": [
+      {
+        "id": "m1_b1_g0",
+        "family": "prompt",
+        "m": 1,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 126.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          126
+        ]
+      },
+      {
+        "id": "m2_b1_g0",
+        "family": "prompt",
+        "m": 2,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 125.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          125
+        ]
+      },
+      {
+        "id": "m4_b1_g0",
+        "family": "input",
+        "m": 4,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 123.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          123
+        ]
+      },
+      {
+        "id": "m4_b1_g1",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 1,
+        "dimension": {
+          "n": 100,
+          "mean": 122.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          122
+        ]
+      },
+      {
+        "id": "m4_b1_g3",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 3,
+        "dimension": {
+          "n": 100,
+          "mean": 120.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          120
+        ]
+      },
+      {
+        "id": "m4_b1_g7",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 7,
+        "dimension": {
+          "n": 100,
+          "mean": 116.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          116
+        ]
+      },
+      {
+        "id": "m4_b1_g15",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 15,
+        "dimension": {
+          "n": 100,
+          "mean": 108.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          108
+        ]
+      },
+      {
+        "id": "m4_b1_g31",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 31,
+        "dimension": {
+          "n": 100,
+          "mean": 92.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          92
+        ]
+      },
+      {
+        "id": "m4_b1_g63",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 63,
+        "dimension": {
+          "n": 100,
+          "mean": 60.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          60
+        ]
+      },
+      {
+        "id": "m4_b1_g127",
+        "family": "mixed",
+        "m": 4,
+        "b": 1,
+        "g": 127,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      },
+      {
+        "id": "m8_b1_g0",
+        "family": "prompt",
+        "m": 8,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 119.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          119
+        ]
+      },
+      {
+        "id": "m16_b1_g0",
+        "family": "prompt",
+        "m": 16,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 111.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          111
+        ]
+      },
+      {
+        "id": "m32_b1_g0",
+        "family": "prompt",
+        "m": 32,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 95.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          95
+        ]
+      },
+      {
+        "id": "m64_b1_g0",
+        "family": "prompt",
+        "m": 64,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 63.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          63
+        ]
+      },
+      {
+        "id": "m128_b1_g0",
+        "family": "prompt",
+        "m": 128,
+        "b": 1,
+        "g": 0,
+        "dimension": {
+          "n": 100,
+          "mean": 0.0,
+          "std": 0.0
+        },
+        "individual_dimensions": [
+          0
+        ]
+      }
+    ]
+  },
+  "local_smoke_results_preserved": 60
+}

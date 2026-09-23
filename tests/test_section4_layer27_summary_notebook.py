@@ -27,7 +27,9 @@ def test_summary_notebook_preserves_data_and_bands(directory, monkeypatch):
     assert len(b.collections) == 2
     assert scope['DRIFT_CONDITION'] == 'm4_b1_g3'
     assert len(c.collections) == 3
-    expected = sorted([r for r in scope['native']['token_statistics'] if r['m']==4 and r['b']==1],
+    assert scope['diversity']['formal'] and scope['diversity']['examples']==100
+    assert scope['diversity']['distinct_prompt_prefixes']['128']==100
+    expected = sorted([r for r in scope['diversity']['token_statistics'] if r['m']==4 and r['b']==1],
                       key=lambda r:r['b']+r['g'])
     np.testing.assert_allclose(a.lines[0].get_ydata(), [r['dimension']['mean'] for r in expected])
     drift = [r for r in scope['native']['drift_statistics'] if r['condition']=='m4_b1_g3']
