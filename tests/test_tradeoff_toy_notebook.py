@@ -16,7 +16,13 @@ assert len(fig.axes) == 1
 assert len(DATA) == 14
 assert next(row[2:] for row in DATA if row[:2] == ('All-token', 10)) == (22.042, 98.317)
 assert next(row[2:] for row in DATA if row[:2] == ('Prefix-1', 10)) == (38.813, 83.127)
-assert ax.get_xscale() == 'linear'
+assert ax.get_xscale() == 'function'
+import numpy as np
+values = np.array([20, 22, 22.042, 32.487, 34, 37, 39.3, 41])
+np.testing.assert_allclose(expand_x(compress_x(values)), values)
+assert np.all(np.diff(compress_x(values)) > 0)
+assert compress_x(34) - compress_x(22) < 2
+np.testing.assert_allclose(compress_x(39) - compress_x(37), 2)
 assert ax.get_xlabel() == 'General ability'
 assert ax.get_ylabel() == 'Steering performance'
 assert ax.get_xlim()[0] <= min(row[2] for row in DATA)
@@ -25,7 +31,7 @@ for collection, name in zip(ax.collections, STYLES):
     expected = sorted((r for r in DATA if r[0] == name), key=lambda r: r[1] or -1)
     assert collection.get_offsets().tolist() == [[r[2], r[3]] for r in expected]
 assert len(ax.collections) == 5
-assert not ax.texts  # Strength is encoded in marker size, without colliding labels.
+assert any('compressed' in text.get_text() for text in ax.texts)
 assert OUTPUT.name == 'steering_tradeoff_7b_toy.pdf'
 '''))
     NotebookClient(notebook, timeout=90, kernel_name='python3',
