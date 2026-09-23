@@ -21,7 +21,8 @@ import numpy as np
 values = np.array([20, 22, 22.042, 32.487, 34, 37, 39.3, 41])
 np.testing.assert_allclose(expand_x(compress_x(values)), values)
 assert np.all(np.diff(compress_x(values)) > 0)
-assert compress_x(34) - compress_x(22) < 0.6
+assert COMPRESS_END == 37
+assert compress_x(37) - compress_x(22) <= 0.61
 np.testing.assert_allclose(compress_x(39) - compress_x(37), 2)
 assert ax.get_xlabel() == 'General Ability'
 assert ax.get_ylabel() == 'Steering Performance'
