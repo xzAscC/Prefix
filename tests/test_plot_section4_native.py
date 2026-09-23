@@ -32,3 +32,15 @@ def test_full_coverage_cannot_contain_duplicate_records():
     rows = [dict(identity={'index':1,'head':0,'condition':{'id':'m4_b1_g0'}})] * 2
     with pytest.raises(ValueError, match='coverage'):
         module.check_coverage(rows, [1], [0], [{'id':'m4_b1_g0'}])
+
+
+def test_eos_audit_counts_behaviors_once_and_marks_post_eos_queries():
+    rows = [dict(identity={'index':i},first_eos=eos) for i,eos in [(1,50),(1,50),(2,200),(2,200)]]
+    audit = module.trace_statistics(rows)
+    assert audit['examples'] == 2
+    assert audit['eos_at_or_before_first_common_query'] == 1
+    assert audit['eos_at_or_before_reference'] == 2
+    assert audit['common_positions_at_or_after_eos'] == 184
+    assert audit['common_positions_total'] == 256
+    with pytest.raises(ValueError, match='inconsistent EOS'):
+        module.trace_statistics(rows + [dict(identity={'index':1},first_eos=99)])

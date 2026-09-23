@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 
@@ -350,6 +351,32 @@ def analyze(config, cohort, indices, device):
                       f'{time.monotonic()-start:.2f}s',flush=True)
 
 
+def run_workers(args, indices):
+    """Overlap durable checkpoint I/O on disjoint examples within one GPU job."""
+    count = min(args.workers, len(indices))
+    processes = []
+    try:
+        for shard in range(count):
+            command = [sys.executable, '-u', str(Path(__file__).resolve()), 'analyze',
+                       '--config', str(args.config), '--device', args.device,
+                       '--shards', str(count), '--shard', str(shard), '--indices', *map(str,indices)]
+            processes.append(subprocess.Popen(command))
+        for process in processes:
+            code = process.wait()
+            if code:
+                raise subprocess.CalledProcessError(code, 'native analysis worker')
+    finally:
+        pending = [process for process in processes if process.poll() is None]
+        for process in pending:
+            process.terminate()
+        for process in pending:
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('phase',choices=['prepare','extract','analyze'])
@@ -359,9 +386,10 @@ def main():
     parser.add_argument('--device',default='cuda')
     parser.add_argument('--shard',type=int,default=0)
     parser.add_argument('--shards',type=int,default=1)
+    parser.add_argument('--workers',type=int,default=4)
     args = parser.parse_args()
     config = yaml.safe_load(args.config.read_text())
-    torch.set_num_threads(2)
+    torch.set_num_threads(1 if args.shards > 1 else 2)
     torch.backends.cuda.matmul.allow_tf32 = False
     log = ROOT / f'logs/section4_native_{args.phase}_{args.shard}.log'
     with tee_stdout(log), contextlib.redirect_stderr(sys.stdout):
@@ -379,6 +407,9 @@ def main():
             indices = indices[args.shard::args.shards]
             if args.phase == 'extract':
                 extract(config,cohort,indices,args.batch_size or config['batch_size'],args.device)
+            elif args.shards == 1 and args.workers > 1 and len(indices) > 1:
+                print(f'launching {min(args.workers,len(indices))} disjoint analysis workers on {args.device}',flush=True)
+                run_workers(args,indices)
             else:
                 analyze(config,cohort,indices,args.device)
 

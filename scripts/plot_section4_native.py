@@ -37,6 +37,20 @@ def check_coverage(rows, indices, heads, configs):
         raise ValueError(f'incomplete or duplicate coverage: {len(actual)} / {len(expected)}')
 
 
+def trace_statistics(rows):
+    traces = {}
+    for row in rows:
+        index,eos = row['identity']['index'],row['first_eos']
+        if index in traces and traces[index] != eos:
+            raise ValueError('inconsistent EOS metadata within an example')
+        traces[index] = eos
+    return dict(examples=len(traces),
+                eos_at_or_before_first_common_query=sum(e is not None and e <= 128 for e in traces.values()),
+                eos_at_or_before_reference=sum(e is not None and e <= 256 for e in traces.values()),
+                common_positions_at_or_after_eos=sum(max(0,256-max(128,e)) for e in traces.values() if e is not None),
+                common_positions_total=128*len(traces))
+
+
 def token_statistics(rows):
     groups = {}
     for row in rows:
@@ -218,6 +232,10 @@ def main():
             reference_error_above_1e_5=sum(e>1e-5 for e in fit_errors),
             analysis_hashes=sorted({r['identity']['analysis_sha256'] for r in rows}),
             token_statistics=stats,drift_statistics=drift_stats,controlled_dimensions=controls)
+        summary['trace_audit'] = trace_statistics(rows)
+        summary['rank_rtol'] = config['rank_rtol']
+        summary['max_r_norm'] = max(row['fit']['r_norm'] for row in rows)
+        summary['median_r_norm'] = float(np.median([row['fit']['r_norm'] for row in rows]))
         if len(summary['analysis_hashes']) != 1:
             raise ValueError('mixed runner implementations')
         write_json_atomic(ROOT/f'results/section4_native_summary{suffix}.json',summary)
@@ -239,12 +257,14 @@ def main():
 - Query-drift measurements: {summary['drift_units']:,}.
 - Reference-fit error: median {summary['median_reference_error']:.3g}, maximum {max(fit_errors):.3g}; {summary['unconverged_fits']} fits did not reach the configured tolerance.
 - Pre-prompt causal controls and residual-aware linear replay certificates passed their numerical checks.
+- EOS occurs at or before the first common query in {summary['trace_audit']['eos_at_or_before_first_common_query']}/{len(indices)} traces and at or before the fitting query in {summary['trace_audit']['eos_at_or_before_reference']}/{len(indices)} traces. These fixed-length, post-EOS diagnostics must not be described as ordinary EOS-terminated generation.
+- Displacement norm: median {summary['median_r_norm']:.3g}, maximum {summary['max_r_norm']:.3g}. Numerical rank uses relative singular-value tolerance {config['rank_rtol']:g}.
 
 ## Design
 
 The cohort takes all 95 original HarmBench inputs with at least 128 input tokens and the five longest remaining inputs. The latter retain their original requests and receive the explicit neutral introductory context recorded in `data/section4_native_cohort.json`. This selected contextual cohort is not representative of all 400 behaviors. Summary JSON also gives the 95 original-only sensitivity results.
 
-Frozen representations come from the pinned Qwen3-4B revision. A common greedy trace uses the original 8-token instruction suffix and is extended to 256 tokens; EOS positions are recorded, but EOS does not truncate this fixed-length diagnostic. The prompt library contains 128 nested instruction tokens. These are controlled fixed-state calculations, not separately generated trajectories for each condition.
+Frozen representations come from BF16 forward passes of the pinned Qwen3-4B revision; attention replay and optimization use float64. A common greedy trace uses the original 8-token instruction suffix and is extended to 256 tokens; EOS positions are recorded, but EOS does not truncate this fixed-length diagnostic. The prompt library contains 128 nested instruction tokens. These are controlled fixed-state calculations, not separately generated trajectories for each condition.
 
 Every evaluation uses Qwen3 QK RMS normalization, RoPE, and an actual causal mask. The prompt arm has its own compact positions for input + prompt + continuation; the steering arm has compact positions for input + continuation. The same unmodified reading representation is used in both arms, with its appropriate position ID. The library is frozen; we do not claim equality of the hidden states that independent full-model runs would produce.
 

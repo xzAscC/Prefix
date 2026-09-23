@@ -65,3 +65,30 @@ def test_result_validation_rejects_missing_and_misassigned_queries():
         module.validate_result(row, {'index':1}, [3,4,5])
     with pytest.raises(ValueError):
         module.validate_result(row, {'index':2}, [3,4])
+
+
+def test_parallel_workers_partition_examples_and_clean_up_on_failure(monkeypatch):
+    from types import SimpleNamespace
+    import subprocess
+    launched = []
+    class Process:
+        def __init__(self, command):
+            self.command,self.returncode,self.terminated = command,None,False
+            launched.append(self)
+        def wait(self, timeout=None):
+            self.returncode = 17 if self is launched[0] else -15 if self.terminated else 0
+            return self.returncode
+        def poll(self):
+            return self.returncode
+        def terminate(self):
+            self.terminated = True
+        def kill(self):
+            self.terminated = True
+    monkeypatch.setattr(module.subprocess,'Popen',Process)
+    args=SimpleNamespace(workers=4,config=Path('config.yaml'),device='cuda')
+    with pytest.raises(subprocess.CalledProcessError):
+        module.run_workers(args,[1,2,3,4,5])
+    assert len(launched)==4
+    assert {p.command[p.command.index('--shard')+1] for p in launched} == {'0','1','2','3'}
+    assert all(p.command[p.command.index('--shards')+1]=='4' for p in launched)
+    assert all(p.terminated and p.returncode is not None for p in launched[1:])
