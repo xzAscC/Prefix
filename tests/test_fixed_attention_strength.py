@@ -54,3 +54,31 @@ def test_single_position_matching_strength_has_zero_error():
     left, _ = study.output(direction, 1, .2)
     right, _ = study.output(direction, 1, .2)
     torch.testing.assert_close(left, right, atol=0., rtol=0.)
+
+
+def test_frozen_output_replay_supports_native_olmo3_attention():
+    from transformers import Olmo3Config
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention, Olmo3RotaryEmbedding
+
+    torch.manual_seed(7)
+    cfg = Olmo3Config(vocab_size=32, hidden_size=16, intermediate_size=32,
+                      num_attention_heads=2, num_key_value_heads=2,
+                      num_hidden_layers=1, head_dim=8,
+                      layer_types=["full_attention"], eos_token_id=31)
+    cfg._attn_implementation = "eager"
+    attn = Olmo3Attention(cfg, 0).eval()
+    hidden = torch.randn(1, 10, 16)
+    rotary = Olmo3RotaryEmbedding(cfg)
+    embeddings = rotary(hidden, torch.arange(10)[None])
+    mask = torch.full((1, 1, 10, 10), -torch.inf).triu(1)
+    captured = []
+    handle = attn.o_proj.register_forward_pre_hook(
+        lambda _module, args: captured.append(args[0].detach()))
+    with torch.inference_mode():
+        _, weights = attn(hidden, embeddings, mask)
+    handle.remove()
+
+    study = FixedNativeAttention(attn, hidden[0], embeddings, prompt_length=4, head=1)
+    output, probabilities = study.output(torch.zeros(16), 0, 0.0)
+    torch.testing.assert_close(output, captured[0][0, -1, 8:16])
+    torch.testing.assert_close(probabilities, weights[0, 1, -1])
