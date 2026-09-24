@@ -136,7 +136,7 @@ def audit(tag):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--tag', default='lemma5_qwen3_native')
+    parser.add_argument('--tag', default='lemma5_olmo3_7b_native')
     args = parser.parse_args()
     with tee_stdout(ROOT/f'logs/{args.tag}_audit.log'), contextlib.redirect_stderr(sys.stdout):
         audit(args.tag)

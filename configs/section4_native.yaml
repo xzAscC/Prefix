@@ -1,5 +1,5 @@
-model: Qwen/Qwen3-4B
-revision: 1cfa9a7208912126459214e8b04321603b3df60c
+model: allenai/Olmo-3-7B-Think
+revision: d97e442d7cc678210054dbcc9b440894d62c89a4
 layer: 26
 heads: [0, 16]
 sample_count: 100

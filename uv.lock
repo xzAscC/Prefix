@@ -3245,7 +3245,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "torch", specifier = ">=2.6" },
-    { name = "transformers", specifier = ">=4.51" },
+    { name = "transformers", specifier = ">=4.57.0" },
     { name = "vllm", specifier = "==0.28.0" },
 ]
 

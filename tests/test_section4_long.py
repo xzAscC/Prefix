@@ -42,7 +42,7 @@ def test_notification_import_is_absent():
 
 def test_layer_extension_preserves_existing_work_only_for_compatible_manifests():
     before = {'layers':[8,17,26], 'revision':'same', 'generated_tokens':128}
-    after = {**before, 'layers':[2,8,17,26,33]}
+    after = {**before, 'layers':[2,8,17,26]}
     assert module.compatible_extension(before, after)
     assert not module.compatible_extension(before, {**after, 'generated_tokens':64})
     assert not module.compatible_extension(after, before)

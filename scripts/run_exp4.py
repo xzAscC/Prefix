@@ -395,6 +395,7 @@ def direction_phase(
         cfg["model"]["id"],
         max_model_len=cfg["model"]["max_model_len"],
         gpu_memory_utilization=float(cfg["model"].get("gpu_memory_utilization", 0.9)),
+        revision=cfg["model"].get("revision"),
     )
     tokenizer = llm.get_tokenizer()
     records = load_math500()
@@ -436,6 +437,7 @@ def generate_validation_phase(
         cfg["model"]["id"],
         max_model_len=cfg["model"]["max_model_len"],
         gpu_memory_utilization=float(cfg["model"].get("gpu_memory_utilization", 0.9)),
+        revision=cfg["model"].get("revision"),
     )
     tokenizer = llm.get_tokenizer()
     records = load_math500()
@@ -472,6 +474,7 @@ def generate_test_phase(
         cfg["model"]["id"],
         max_model_len=cfg["model"]["max_model_len"],
         gpu_memory_utilization=float(cfg["model"].get("gpu_memory_utilization", 0.9)),
+        revision=cfg["model"].get("revision"),
     )
     tokenizer = llm.get_tokenizer()
     records = load_math500()

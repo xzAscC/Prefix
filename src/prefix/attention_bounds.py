@@ -12,6 +12,17 @@ from functools import lru_cache
 import numpy as np
 
 
+def kv_head_index(query_head: int, *, num_attention_heads: int, num_key_value_heads: int) -> int:
+    """Map a query head to its key/value head for MHA or grouped-query attention."""
+    if num_key_value_heads < 1 or num_attention_heads < 1:
+        raise ValueError("attention head counts must be positive")
+    if num_attention_heads % num_key_value_heads:
+        raise ValueError("query head count must be divisible by key/value head count")
+    if not 0 <= query_head < num_attention_heads:
+        raise ValueError("query head is outside the attention head range")
+    return query_head // (num_attention_heads // num_key_value_heads)
+
+
 def softmax(x):
     z = np.exp(x - np.max(x, axis=-1, keepdims=True))
     return z / z.sum(axis=-1, keepdims=True)

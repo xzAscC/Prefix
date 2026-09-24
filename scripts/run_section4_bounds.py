@@ -1,4 +1,4 @@
-"""Qwen3-4B/HarmBench fixed-state tests of Section 4, with per-unit resume."""
+"""Olmo 3 7B/HarmBench fixed-state tests of Section 4, with per-unit resume."""
 from __future__ import annotations
 
 import argparse
@@ -15,12 +15,12 @@ from urllib.request import urlopen
 
 import numpy as np
 
-from prefix.attention_bounds import construct_shift, diameter, evaluate, jacobian_certificate, softmax
+from prefix.attention_bounds import construct_shift, diameter, evaluate, jacobian_certificate, kv_head_index, softmax
 from prefix.data import HARMBENCH_URL
 from prefix.runner import run_units, tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = '1cfa9a7208912126459214e8b04321603b3df60c'
+REVISION = 'd97e442d7cc678210054dbcc9b440894d62c89a4'
 LAYERS, HEADS = [8, 17, 26], [0, 16]
 PROMPT = ' Please respond safely and helpfully. Do not provide instructions that facilitate harm.'
 VERSION = 1
@@ -76,12 +76,12 @@ def extract(limit):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     torch.set_num_threads(4)
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B', revision=REVISION, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained('allenai/Olmo-3-7B-Think', revision=REVISION, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(
-        'Qwen/Qwen3-4B', revision=REVISION, local_files_only=True,
+        'allenai/Olmo-3-7B-Think', revision=REVISION, local_files_only=True,
         dtype=torch.bfloat16, attn_implementation='sdpa').to('cuda').eval()
     prompt_ids = tokenizer.encode(PROMPT, add_special_tokens=False)[:8]
-    manifest = {'version': VERSION, 'model': 'Qwen/Qwen3-4B', 'revision': REVISION,
+    manifest = {'version': VERSION, 'model': 'allenai/Olmo-3-7B-Think', 'revision': REVISION,
                 'layers': LAYERS, 'heads': HEADS, 'prompt_ids': prompt_ids,
                 'prompt_text': tokenizer.decode(prompt_ids), 'generated_tokens': 16,
                 'dataset': HARMBENCH_URL, 'torch': str(torch.__version__)}
@@ -95,11 +95,13 @@ def extract(limit):
         for layer in LAYERS:
             attn = model.model.layers[layer].self_attn
             for head in HEADS:
-                kv = head // 4
+                head_dim = attn.head_dim
+                kv = kv_head_index(head, num_attention_heads=attn.config.num_attention_heads,
+                                   num_key_value_heads=attn.config.num_key_value_heads)
                 weights[f'{layer}_{head}'] = {
-                    'wk': attn.k_proj.weight[kv * 128:(kv + 1) * 128].detach().float().cpu(),
-                    'wv': attn.v_proj.weight[kv * 128:(kv + 1) * 128].detach().float().cpu(),
-                    'wq': attn.q_proj.weight[head * 128:(head + 1) * 128].detach().float().cpu(),
+                    'wk': attn.k_proj.weight[kv * head_dim:(kv + 1) * head_dim].detach().float().cpu(),
+                    'wv': attn.v_proj.weight[kv * head_dim:(kv + 1) * head_dim].detach().float().cpu(),
+                    'wq': attn.q_proj.weight[head * head_dim:(head + 1) * head_dim].detach().float().cpu(),
                     'knorm': attn.k_norm.weight.detach().float().cpu(),
                     'qnorm': attn.q_norm.weight.detach().float().cpu(),
                     'epsilon': attn.k_norm.variance_epsilon,

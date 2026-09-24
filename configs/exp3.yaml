@@ -1,6 +1,7 @@
 # Experiment 3: full vs prefix-5 vs one-token steering (validation + test)
 model:
-  id: Qwen/Qwen3-4B
+  id: allenai/Olmo-3-7B-Think
+  revision: d97e442d7cc678210054dbcc9b440894d62c89a4
   gpu_memory_utilization: 0.8
   max_model_len: 12288
 direction:                # same safety direction construction as exp1, all grid layers
@@ -11,7 +12,7 @@ direction:                # same safety direction construction as exp1, all grid
   method: dim
 schedules: [full, prefix-5, one-token]
 grid:
-  layers: [1, 5, 8, 12, 16, 19, 23, 27, 30, 34]  # 0-indexed, first/last excluded
+  layers: [1, 5, 8, 12, 16, 17, 19, 23, 26, 30]  # 0-indexed, first/last excluded
   # alpha domain split by schedule: full steering oversteers beyond ~1;
   # sparse interventions (prefix-5 / one-token) need >= 1 for a persistent effect.
   alphas_by_schedule:

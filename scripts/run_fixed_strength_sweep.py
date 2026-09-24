@@ -22,8 +22,8 @@ from prefix.fixed_attention_strength import FixedNativeAttention
 from prefix.runner import tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = 'lemma5_qwen3_native'
-TAG = 'lemma5_qwen3_fixed_ratio'
+SOURCE = 'lemma5_olmo3_7b_native'
+TAG = 'lemma5_olmo3_7b_fixed_ratio'
 FACTORS = [.001, .01, .1, 1., 10.]
 LENGTHS = [4,8,16,32,64,128]
 
@@ -82,7 +82,7 @@ def extract(limit):
 
 def run(limit, mode):
     from transformers import AutoConfig
-    from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention
     from safetensors import safe_open
     from huggingface_hub import hf_hub_download
     m = source_manifest()
@@ -91,7 +91,7 @@ def run(limit, mode):
     cfg._attn_implementation = 'eager'
     # Load the selected module's genuine pretrained parameters without a second
     # full-model allocation. BF16 weights match extraction, then upcast to FP32.
-    attention = Qwen3Attention(cfg, m['layer_index']).to(dtype=torch.bfloat16)
+    attention = Olmo3Attention(cfg, m['layer_index']).to(dtype=torch.bfloat16)
     prefix = f'model.layers.{m["layer_index"]}.self_attn.'
     weights = {}
     for file in folder.glob('*.safetensors'):
@@ -107,7 +107,7 @@ def run(limit, mode):
     manifest = dict(version=1, source=m, mode=mode, factors=FACTORS, lengths=LENGTHS,
         distributed_strength=.1, n_examples=100,
         query='last token of prompt plus 128-token unsteered continuation; no token 129 generated',
-        native_attention='actual Qwen3Attention forward including QK norm, RoPE, causal mask',
+        native_attention='actual Olmo3Attention forward including QK norm, RoPE, causal mask',
         arithmetic='BF16 model representations and weights upcast; native attention evaluated in FP32',
         comparison='frozen pre-intervention representations and identical unsteered readout query',
         direction_sha256=digest(direction_path),

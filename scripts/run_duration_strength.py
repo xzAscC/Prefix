@@ -1,4 +1,4 @@
-"""Run Lemma 5's native output diagnostic on Qwen3-4B and 100 HarmBench cases.
+"""Run Lemma 5's native output diagnostic on Olmo 3 7B and 100 HarmBench cases.
 
 uv run python scripts/run_duration_strength.py --limit 100
 The default 128-token diagnostic continues after EOS, recording first EOS.
@@ -26,8 +26,8 @@ from prefix.runner import tee_stdout, write_json_atomic
 from prefix.steering import dim_direction, mean_hidden_norm
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL = 'Qwen/Qwen3-4B'
-REVISION = '1cfa9a7208912126459214e8b04321603b3df60c'
+MODEL = 'allenai/Olmo-3-7B-Think'
+REVISION = 'd97e442d7cc678210054dbcc9b440894d62c89a4'
 LENGTHS = [4, 8, 16, 32, 64, 128]
 
 
@@ -203,7 +203,7 @@ def main():
     parser.add_argument('--layer', type=int, default=17, help='zero-based; default is displayed layer 18')
     parser.add_argument('--head', type=int, default=0)
     parser.add_argument('--alpha', type=float, default=.1)
-    parser.add_argument('--tag', default='lemma5_qwen3_native')
+    parser.add_argument('--tag', default='lemma5_olmo3_7b_native')
     args = parser.parse_args()
     if not 1 <= args.limit <= 100 or args.alpha <= 0:
         parser.error('limit must be 1..100 and alpha positive')

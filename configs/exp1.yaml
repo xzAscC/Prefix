@@ -1,7 +1,8 @@
 # Experiment 1: safety direction construction + alignment-behavior analysis
 model:
-  id: Qwen/Qwen3-4B
-  layer: 20
+  id: allenai/Olmo-3-7B-Think
+  revision: d97e442d7cc678210054dbcc9b440894d62c89a4
+  layer: 17
   gpu_memory_utilization: 0.8
   max_model_len: 8192
 direction:

@@ -64,6 +64,7 @@ def direction_phase(config: dict[str, Any]) -> dict[int, DirectionRecord]:
         model["id"],
         max_model_len=model.get("max_model_len"),
         gpu_memory_utilization=float(model.get("gpu_memory_utilization", 0.9)),
+        revision=model.get("revision"),
     )
     direction = (
         config["direction"]
@@ -370,6 +371,7 @@ def main(argv: list[str] | None = None) -> None:
                     gpu_memory_utilization=float(
                         config["model"].get("gpu_memory_utilization", 0.9)
                     ),
+                    revision=config["model"].get("revision"),
                 )
                 generate_harmbench(
                     llm,

@@ -8,7 +8,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from safetensors import safe_open
 from transformers import AutoConfig
-from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention
+from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention
 
 from prefix.duration_strength import sample_summary
 from prefix.runner import tee_stdout, write_json_atomic
@@ -21,7 +21,7 @@ def verify():
     folder = Path(hf_hub_download(m['model'], 'config.json', revision=m['revision'], local_files_only=True)).parent
     cfg = AutoConfig.from_pretrained(folder, local_files_only=True)
     cfg._attn_implementation = 'sdpa'
-    attn = Qwen3Attention(cfg, m['layer_index']).to(dtype=torch.bfloat16)
+    attn = Olmo3Attention(cfg, m['layer_index']).to(dtype=torch.bfloat16)
     prefix = f'model.layers.{m["layer_index"]}.self_attn.'
     weights = {}
     for file in folder.glob('*.safetensors'):

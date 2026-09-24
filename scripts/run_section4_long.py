@@ -1,4 +1,4 @@
-"""Extend Section 4 token sweeps to 128 using local Qwen3-4B activations.
+"""Extend Section 4 token sweeps to 128 using local Olmo 3 7B activations.
 
 Notifications are intentionally disabled. Existing short-run artifacts are
 read-only inputs; this study has independent manifests and resume checkpoints.
@@ -16,13 +16,13 @@ import time
 
 import numpy as np
 
-from prefix.attention_bounds import construct_shift, diameter, evaluate
+from prefix.attention_bounds import construct_shift, diameter, evaluate, kv_head_index
 from prefix.runner import run_units, tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = '1cfa9a7208912126459214e8b04321603b3df60c'
+REVISION = 'd97e442d7cc678210054dbcc9b440894d62c89a4'
 HEADS = (0, 16)
-LAYERS = [2, 8, 17, 26, 33]
+LAYERS = [2, 8, 17, 26]
 LENGTHS = [1, 2, 4, 8, 16, 32, 64, 128]
 PROMPT_COUNT = GENERATION_COUNT = 128
 LONG_PROMPT = (
@@ -87,7 +87,7 @@ def extract(limit, batch_size=8):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     torch.set_num_threads(4)
     torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B', revision=REVISION, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained('allenai/Olmo-3-7B-Think', revision=REVISION, local_files_only=True)
     prompt = tokenizer.encode(LONG_PROMPT, add_special_tokens=False)[:PROMPT_COUNT]
     old_meta = json.loads((ROOT / 'results/section4_manifest.json').read_text())
     if len(prompt) != PROMPT_COUNT or prompt[:8] != old_meta['prompt_ids']:
@@ -99,18 +99,20 @@ def extract(limit, batch_size=8):
     if manifest_path.exists() and not compatible_extension(json.loads(manifest_path.read_text()), manifest):
         raise ValueError('Long extraction manifest mismatch')
     write_json_atomic(manifest_path, manifest)
-    model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-4B', revision=REVISION,
+    model = AutoModelForCausalLM.from_pretrained('allenai/Olmo-3-7B-Think', revision=REVISION,
               local_files_only=True, dtype=torch.bfloat16, attn_implementation='sdpa').to('cuda').eval()
 
     weights = {}
     for layer in LAYERS:
         attn = model.model.layers[layer].self_attn
         for head in HEADS:
-            kv = head // 4
+            head_dim = attn.head_dim
+            kv = kv_head_index(head, num_attention_heads=attn.config.num_attention_heads,
+                               num_key_value_heads=attn.config.num_key_value_heads)
             weights[f'{layer}_{head}'] = {
-                'wk': attn.k_proj.weight[kv*128:(kv+1)*128].detach().float().cpu(),
-                'wv': attn.v_proj.weight[kv*128:(kv+1)*128].detach().float().cpu(),
-                'wq': attn.q_proj.weight[head*128:(head+1)*128].detach().float().cpu(),
+                'wk': attn.k_proj.weight[kv*head_dim:(kv+1)*head_dim].detach().float().cpu(),
+                'wv': attn.v_proj.weight[kv*head_dim:(kv+1)*head_dim].detach().float().cpu(),
+                'wq': attn.q_proj.weight[head*head_dim:(head+1)*head_dim].detach().float().cpu(),
             }
     weights_path = ROOT / 'checkpoints/section4_long_weights.pt'
     torch.save(weights, weights_path.with_suffix('.tmp'))
