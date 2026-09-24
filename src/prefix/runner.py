@@ -180,6 +180,43 @@ def write_json_atomic(path: str | Path, obj) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def run_units(
+    path: str | Path,
+    manifest: dict[str, Any],
+    units: Iterable[str],
+    compute: Any,
+    *,
+    clean_result: Any = None,
+) -> dict[str, Any]:
+    """Resume per-unit work from a durable JSONL journal and save its summary."""
+    checkpoint = Path(path)
+    journal = checkpoint.with_suffix(".jsonl")
+    state = (
+        read_json(checkpoint)
+        if checkpoint.exists()
+        else {"manifest": dict(manifest), "units": {}}
+    )
+    if state.get("manifest") != manifest:
+        raise ValueError(f"manifest mismatch: {checkpoint}")
+    if not checkpoint.exists():
+        write_json_atomic(checkpoint, state)
+
+    results = state.setdefault("units", {})
+    for record in read_jsonl(journal):
+        results[record["id"]] = record["result"]
+    for unit in units:
+        if unit in results:
+            continue
+        result = compute(unit)
+        if clean_result is not None:
+            result = clean_result(result)
+        append_jsonl(journal, [{"id": unit, "result": result}])
+        results[unit] = result
+    write_json_atomic(checkpoint, state)
+    journal.unlink(missing_ok=True)
+    return state
+
+
 def _reject_symlink_components(path: Path) -> None:
     current = Path(path.anchor) if path.is_absolute() else Path.cwd()
     for component in path.parts[1:] if path.is_absolute() else path.parts:

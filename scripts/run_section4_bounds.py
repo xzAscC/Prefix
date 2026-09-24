@@ -17,7 +17,7 @@ import numpy as np
 
 from prefix.attention_bounds import construct_shift, diameter, evaluate, jacobian_certificate, softmax
 from prefix.data import HARMBENCH_URL
-from prefix.runner import append_jsonl, read_jsonl, tee_stdout, write_json_atomic
+from prefix.runner import run_units, tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = '1cfa9a7208912126459214e8b04321603b3df60c'
@@ -34,26 +34,6 @@ def clean(value):
     if isinstance(value, (float, np.floating)) and not np.isfinite(value):
         return None
     return value
-
-
-def run_units(path, manifest, units, compute):
-    state = json.loads(path.read_text()) if path.exists() else {'manifest': manifest, 'units': {}}
-    if state['manifest'] != manifest:
-        raise ValueError(f'manifest mismatch: {path}')
-    if not path.exists():
-        write_json_atomic(path, state)
-    journal = path.with_suffix('.jsonl')
-    for record in read_jsonl(journal):
-        state['units'][record['id']] = record['result']
-    for unit in units:
-        if unit in state['units']:
-            continue
-        result = clean(compute(unit))
-        append_jsonl(journal, [{'id': unit, 'result': result}])
-        state['units'][unit] = result
-    write_json_atomic(path, state)
-    journal.unlink(missing_ok=True)
-    return state
 
 
 def conditions(suite='main'):
@@ -325,7 +305,7 @@ def analyze(limit, start=0, stride=1, suite='main'):
                 raise AssertionError(f'Bound chain failed: {unit}: {chain}')
             return row
         started = time.monotonic()
-        run_units(checkpoint_path, manifest, unit_ids, compute)
+        run_units(checkpoint_path, manifest, unit_ids, compute, clean_result=clean)
         if checkpoint_path != result_path:
             os.replace(checkpoint_path, result_path)
             result_path.with_suffix('.jsonl').unlink(missing_ok=True)

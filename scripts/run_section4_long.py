@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,9 +17,11 @@ import time
 import numpy as np
 
 from prefix.attention_bounds import construct_shift, diameter, evaluate
-from prefix.runner import tee_stdout, write_json_atomic
+from prefix.runner import run_units, tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
+REVISION = '1cfa9a7208912126459214e8b04321603b3df60c'
+HEADS = (0, 16)
 LAYERS = [2, 8, 17, 26, 33]
 LENGTHS = [1, 2, 4, 8, 16, 32, 64, 128]
 PROMPT_COUNT = GENERATION_COUNT = 128
@@ -37,13 +38,6 @@ LONG_PROMPT = (
     ' underlying goal wherever possible while giving a concise, accurate, and responsible answer.'
     ' Ask for relevant context when the question is ambiguous, and clearly identify any assumptions.'
 )
-
-
-def sibling(name):
-    spec = importlib.util.spec_from_file_location(name, ROOT / f'scripts/{name}.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def compatible_extension(before, after):
@@ -74,6 +68,16 @@ def input_cohort(lengths):
     return sorted(index for index, length in lengths.items() if length >= max(LENGTHS))
 
 
+def clean(value):
+    if isinstance(value, dict):
+        return {key: clean(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return None
+    return value
+
+
 def activation_path(index):
     return ROOT / f'checkpoints/section4_long_activations_{index:03d}.pt'
 
@@ -81,10 +85,9 @@ def activation_path(index):
 def extract(limit, batch_size=8):
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    base = sibling('run_section4_bounds')
     torch.set_num_threads(4)
     torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B', revision=base.REVISION, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen3-4B', revision=REVISION, local_files_only=True)
     prompt = tokenizer.encode(LONG_PROMPT, add_special_tokens=False)[:PROMPT_COUNT]
     old_meta = json.loads((ROOT / 'results/section4_manifest.json').read_text())
     if len(prompt) != PROMPT_COUNT or prompt[:8] != old_meta['prompt_ids']:
@@ -96,13 +99,13 @@ def extract(limit, batch_size=8):
     if manifest_path.exists() and not compatible_extension(json.loads(manifest_path.read_text()), manifest):
         raise ValueError('Long extraction manifest mismatch')
     write_json_atomic(manifest_path, manifest)
-    model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-4B', revision=base.REVISION,
+    model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-4B', revision=REVISION,
               local_files_only=True, dtype=torch.bfloat16, attn_implementation='sdpa').to('cuda').eval()
 
     weights = {}
     for layer in LAYERS:
         attn = model.model.layers[layer].self_attn
-        for head in base.HEADS:
+        for head in HEADS:
             kv = head // 4
             weights[f'{layer}_{head}'] = {
                 'wk': attn.k_proj.weight[kv*128:(kv+1)*128].detach().float().cpu(),
@@ -203,14 +206,13 @@ def extract(limit, batch_size=8):
 
 def analyze(limit, start=0, stride=1):
     import torch
-    base = sibling('run_section4_bounds')
     torch.set_num_threads(1)
     torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
     weights = torch.load(ROOT / 'checkpoints/section4_long_weights.pt', weights_only=True)
     manifest = {**json.loads((ROOT / 'results/section4_long_manifest.json').read_text()),
                 'analysis_version':3, 'jacobian_anchor':'last_input_token', 'conditions':conditions()}
     by_id = {row['id']:row for row in conditions()}
-    units = [f'{layer}_{head}/{c["id"]}' for layer in LAYERS for head in base.HEADS for c in conditions()]
+    units = [f'{layer}_{head}/{c["id"]}' for layer in LAYERS for head in HEADS for c in conditions()]
     for index in range(start, limit, stride):
         result_path = ROOT / f'results/section4_long_{index:03d}.json'
         if result_path.exists():
@@ -263,7 +265,7 @@ def analyze(limit, start=0, stride=1):
                 raise AssertionError(f'Bound chain failed: {index}/{unit}')
             return row
         begin = time.monotonic()
-        base.run_units(result_path,manifest,units,compute)
+        run_units(result_path, manifest, units, compute, clean_result=clean)
         print(f'analyze {index+1}/{limit}: {len(units)} completed or explicitly ineligible '
               f'({time.monotonic()-begin:.1f}s)',flush=True)
 

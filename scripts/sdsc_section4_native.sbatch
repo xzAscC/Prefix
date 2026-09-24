@@ -9,4 +9,3 @@ export PYTHONUNBUFFERED=1
 
 uv run --no-sync python -u scripts/run_section4_native.py extract
 uv run --no-sync python -u scripts/run_section4_native.py analyze
-uv run --no-sync python -u scripts/plot_section4_native.py

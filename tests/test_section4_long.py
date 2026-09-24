@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from prefix.runner import run_units
 
 
 SPEC = importlib.util.spec_from_file_location('section4_long', Path(__file__).parents[1] / 'scripts/run_section4_long.py')
@@ -45,3 +46,8 @@ def test_layer_extension_preserves_existing_work_only_for_compatible_manifests()
     assert module.compatible_extension(before, after)
     assert not module.compatible_extension(before, {**after, 'generated_tokens':64})
     assert not module.compatible_extension(after, before)
+
+
+def test_long_sweep_uses_shared_checkpoint_runner():
+    assert module.run_units is run_units
+    assert not hasattr(module, 'sibling')

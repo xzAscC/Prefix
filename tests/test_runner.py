@@ -45,6 +45,47 @@ def test_jsonl_resume_and_atomic_json(tmp_path: Path) -> None:
     assert runner.read_json(tmp_path / "missing.json", default=[]) == []
 
 
+def test_run_units_resumes_each_durable_result_before_continuing(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "results.json"
+    calls: list[str] = []
+
+    def interrupted(unit: str) -> dict[str, str]:
+        calls.append(unit)
+        if unit == "b":
+            raise RuntimeError("interrupted")
+        return {"unit": unit}
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        runner.run_units(checkpoint, {"version": 1}, ["a", "b"], interrupted)
+
+    state = runner.run_units(
+        checkpoint,
+        {"version": 1},
+        ["a", "b", "c"],
+        lambda unit: calls.append(unit) or {"unit": unit},
+    )
+
+    assert calls == ["a", "b", "b", "c"]
+    assert state["units"] == {
+        "a": {"unit": "a"},
+        "b": {"unit": "b"},
+        "c": {"unit": "c"},
+    }
+    assert not checkpoint.with_suffix(".jsonl").exists()
+
+
+def test_run_units_rejects_checkpoint_from_another_experiment(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "results.json"
+    runner.run_units(checkpoint, {"version": 1}, ["a"], lambda _: 1)
+
+    with pytest.raises(ValueError, match="manifest mismatch"):
+        runner.run_units(checkpoint, {"version": 2}, ["a"], lambda _: 2)
+
+
 def test_iter_jsonl_is_lazy_and_reads_one_line_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
