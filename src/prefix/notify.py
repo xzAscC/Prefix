@@ -15,8 +15,7 @@ repo root; real environment variables win over ``.env`` values):
     PREFIX_GMAIL_APP_PASSWORD=<16-char app password>
     PREFIX_NOTIFY_TO=<comma-separated recipients; default: sender>
 
-Notification failures (missing creds, SMTP down, blocked egress on cluster
-compute nodes) never crash the wrapped run: they print a warning to stderr.
+Notification failures (missing creds, SMTP down, blocked network egress) never crash the wrapped run: they print a warning to stderr.
 """
 
 from __future__ import annotations
