@@ -316,9 +316,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--marker", type=Path)
     parser.add_argument("--dataset-cache-root", type=Path)
     parser.add_argument("--phase", choices=("check", "load"), default="check")
-    parser.add_argument(
-        "--limit", type=int, help="accepted for SDSC smoke-script compatibility"
-    )
     args = parser.parse_args(argv)
     model_ids = tuple(args.model_id or no_steering.MODEL_MATRIX)
     if args.dataset_cache_root is not None:

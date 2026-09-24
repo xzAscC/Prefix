@@ -84,7 +84,7 @@ def load_harmbench(
 def validate_offline_dataset_caches(cache_dir: Path) -> dict[str, int]:
     """Load every configured benchmark from an existing cache only.
 
-    The caller supplies the shared cache root used by the SDSC jobs.  The
+    The caller supplies the shared cache root.  The
     HarmBench file is checked before loading so its URL fallback can never be
     reached by this gate; Hugging Face datasets obey the offline environment
     variables while resolving their cached revisions.
