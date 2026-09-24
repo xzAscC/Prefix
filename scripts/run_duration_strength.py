@@ -130,7 +130,7 @@ def run(args):
         head=args.head, alpha=args.alpha, lengths=LENGTHS, target=128, n_examples=100,
         seed=42, data_sha256=digest(data), torch=torch.__version__, transformers=transformers.__version__,
         dtype='bfloat16', decoding='greedy, 128 tokens regardless of EOS; first EOS recorded',
-        intervention='attention input after input_layernorm, before native QK norm and RoPE',
+        intervention='attention input before native QK normalization and RoPE',
         positions='last prompt token plus k-1 generated-token positions',
         output='selected head before o_proj at query predicting generated token 128',
         calibration='per-example oracle: unsteered step-128 attention mass; beta=alpha*mass(S)/mass(j)',

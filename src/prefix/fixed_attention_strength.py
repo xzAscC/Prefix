@@ -25,6 +25,10 @@ class FixedNativeAttention:
             raise ValueError('invalid prompt length')
         self.mask = torch.full((1, 1, len(hidden), len(hidden)), -torch.inf,
                                dtype=torch.float32, device=hidden.device).triu(1)
+        window = getattr(self.attn, 'sliding_window', None)
+        if window is not None:
+            positions = torch.arange(len(hidden), device=hidden.device)
+            self.mask.masked_fill_(positions[None] <= positions[:, None] - window, -torch.inf)
 
     @torch.inference_mode()
     def output(self, direction, length, strength):

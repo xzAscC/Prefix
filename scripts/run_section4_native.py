@@ -113,11 +113,17 @@ def prepare(config):
     indices = choose_examples(lengths, config['sample_count'])
     tokenizer = AutoTokenizer.from_pretrained(config['model'], revision=config['revision'], local_files_only=True)
     old_meta = json.loads((ROOT / 'results/section4_long_manifest.json').read_text())
-    cohort = dict(version=1, config=config, examples=[], source_manifest=old_meta,
+    if any(old_meta.get(key) != config[key] for key in ('model', 'revision')):
+        raise ValueError('source activation model/revision does not match native configuration')
+    cohort = dict(version=2, config=config, examples=[], source_manifest=old_meta,
                   selection='all original inputs >=128 tokens, then longest short inputs with explicit context expansion')
     weights = load_tensor(ROOT / 'checkpoints/section4_weights.pt')
     selected_weights = {f'{config["layer"]}_{head}': weights[f'{config["layer"]}_{head}'] for head in config['heads']}
+    if any(value.get('native_schema') != 2 for value in selected_weights.values()):
+        raise ValueError('re-extract Section 4 weights with native normalization and rotary metadata')
     weight_path = ROOT / 'checkpoints/section4_native_weights.pt'
+    if weight_path.exists() and any(value.get('native_schema') != 2 for value in load_tensor(weight_path).values()):
+        raise ValueError('native weight cache predates schema 2; use a fresh experiment workspace')
     if not weight_path.exists():
         save_tensor(weight_path, selected_weights)
     cohort['weights_sha256'] = file_digest(weight_path)

@@ -24,3 +24,5 @@ figs/*
 !figs/.gitkeep
 data/*
 !data/.gitkeep
+notebooks/*
+!notebooks/.gitkeep

@@ -119,3 +119,41 @@ def test_subspace_rank_and_equal_norm_query_controls():
     assert (basis[:rank] @ changes['null']).norm().item() < 1e-12
     assert (basis[:rank] @ changes['sensitive']).norm().item() == pytest.approx(.4)
     assert subspace(torch.cat([directions, torch.tensor([[0.,1.,0.,0.]])]))[1] == 2
+
+
+@pytest.mark.parametrize('attention_type', ['full_attention', 'sliding_attention'])
+def test_olmo_native_replay_matches_global_qk_norm_rotary_and_window(attention_type):
+    from transformers import Olmo3Config
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention, Olmo3RotaryEmbedding
+    from prefix.native_attention import extract_head_weights
+    torch.manual_seed(73)
+    rope = dict(rope_type='yarn', rope_theta=10000., factor=2., original_max_position_embeddings=32)
+    config = Olmo3Config(hidden_size=12, intermediate_size=24, num_hidden_layers=1,
+                        num_attention_heads=2, num_key_value_heads=2, head_dim=4,
+                        layer_types=[attention_type], sliding_window=3,
+                        rope_parameters={attention_type: rope}, max_position_embeddings=128)
+    config._attn_implementation = 'eager'
+    attn, rotary = Olmo3Attention(config, 0).eval(), Olmo3RotaryEmbedding(config)
+    hidden = torch.randn(1, 12, 12)
+    weights = extract_head_weights(attn, rotary, 1)
+    study = NativeHead(hidden[0].double(), {k: v.double() if torch.is_tensor(v) else v for k, v in weights.items()}, 4, 2, 6)
+    r = torch.randn(12, dtype=torch.float64) * .25
+    captured = []
+    handle = attn.o_proj.register_forward_pre_hook(lambda _, args: captured.append(args[0].detach()))
+    try:
+        for arm in ['prompt', 'steer']:
+            indices, selected = study.context(2, 2, 1, arm)
+            states = hidden[:, indices].clone()
+            if arm == 'steer':
+                states[:, selected] += r.float()
+            positions = torch.arange(len(indices))
+            allowed = positions[None] <= positions[:, None]
+            if attention_type == 'sliding_attention':
+                allowed &= positions[None] > positions[:, None] - 3
+            mask = torch.zeros(len(indices), len(indices)).masked_fill(~allowed, -torch.inf)[None, None]
+            with torch.no_grad():
+                attn(states, rotary(states, positions[None], layer_type=attention_type), mask)
+            actual = study.outputs(2, 2, 1, indices, r if arm == 'steer' else None, arm)
+            torch.testing.assert_close(actual.float(), captured[-1][0, :, 4:8], atol=3e-6, rtol=3e-5)
+    finally:
+        handle.remove()

@@ -1,4 +1,4 @@
-"""Frozen-state Qwen3 head interventions with native QK norm, RoPE, and causality.
+"""Frozen-state Qwen3/OLMo3 head interventions with native QK norm, RoPE, and causality.
 
 Prompt and steering arms use their own compact position IDs. A common hidden
 query therefore has the appropriate rotary position in each arm. Fitting is
@@ -15,6 +15,37 @@ import torch
 from prefix.runner import write_json_atomic
 
 LENGTHS = (1, 2, 4, 8, 16, 32, 64, 128)
+
+
+def extract_head_weights(attention, rotary, head, shared=None):
+    """Capture native normalization scope, rotary parameters and causal window."""
+    shared = {} if shared is None else shared
+    dim = attention.head_dim
+    count, kv_count = attention.config.num_attention_heads, attention.config.num_key_value_heads
+    if not 0 <= head < count or count % kv_count:
+        raise ValueError('invalid query/KV head mapping')
+    kv = head // (count // kv_count)
+    whole = attention.q_norm.weight.numel() != dim
+    result = {'wq': attention.q_proj.weight[head*dim:(head+1)*dim].detach().float().cpu(),
+              'wk': attention.k_proj.weight[kv*dim:(kv+1)*dim].detach().float().cpu(),
+              'wv': attention.v_proj.weight[kv*dim:(kv+1)*dim].detach().float().cpu(),
+              'epsilon': attention.config.rms_norm_eps, 'normalization': 'all_heads' if whole else 'head',
+              'q_head_start': head*dim, 'k_head_start': kv*dim,
+              'sliding_window': getattr(attention, 'sliding_window', None), 'native_schema': 2}
+    for kind, index in [('q', head), ('k', kv)]:
+        norm = getattr(attention, f'{kind}_norm').weight
+        result[f'{kind}norm'] = (norm[index*dim:(index+1)*dim] if whole else norm).detach().float().cpu()
+        if whole:
+            key = f'w{kind}_full'
+            if key not in shared:
+                shared[key] = getattr(attention, f'{kind}_proj').weight.detach().float().cpu()
+            result[key] = shared[key]
+    layer_type = getattr(attention, 'attention_type', None)
+    name = f'{layer_type}_inv_freq'
+    result['rope_inv_freq'] = getattr(rotary, name if hasattr(rotary, name) else 'inv_freq').detach().float().cpu()
+    name = f'{layer_type}_attention_scaling'
+    result['rope_scaling'] = float(getattr(rotary, name, getattr(rotary, 'attention_scaling', 1.)))
+    return result
 
 
 def conditions():
@@ -43,13 +74,15 @@ def rmsnorm(x, weight, epsilon):
     return x * torch.rsqrt(x.square().mean(-1, keepdim=True) + epsilon) * weight
 
 
-def rope(x, positions, theta):
+def rope(x, positions, theta, frequencies=None, scaling=1.):
     d = x.shape[-1]
-    frequencies = theta ** (-torch.arange(0, d, 2, dtype=x.dtype, device=x.device) / d)
+    if frequencies is None:
+        frequencies = theta ** (-torch.arange(0, d, 2, dtype=x.dtype, device=x.device) / d)
+    frequencies = frequencies.to(x)
     angles = positions.to(x.dtype)[:, None] * frequencies
     angles = torch.cat([angles, angles], -1)
     rotated = torch.cat([-x[..., d // 2:], x[..., :d // 2]], -1)
-    return x * angles.cos() + rotated * angles.sin()
+    return scaling * (x * angles.cos() + rotated * angles.sin())
 
 
 class NativeHead:
@@ -61,9 +94,16 @@ class NativeHead:
         self.q = hidden @ weights['wq'].T
         self.k = hidden @ weights['wk'].T
         self.v = hidden @ weights['wv'].T
+        if weights['qnorm'].numel() != self.q.shape[-1] or weights['knorm'].numel() != self.k.shape[-1]:
+            raise ValueError('legacy head weights omit normalization scope; re-extract native schema 2')
+        self.whole_norm = weights.get('normalization') == 'all_heads'
+        if self.whole_norm:
+            self.q_full = hidden @ weights['wq_full'].T
+            self.k_full = hidden @ weights['wk_full'].T
         self.projection = torch.cat([weights['wk'], weights['wv']])
-        # Only this row space affects K/V. Optimizing its projected coordinates
-        # is exactly optimizing a realizable hidden-state displacement r.
+        # Search realizable hidden shifts in the selected K/V row space.
+        # With all-head normalization, recompute full Q/K projections of that
+        # shift as well; other heads affect the normalization denominator.
         gram = self.projection @ self.projection.T
         self.lift = self.projection.T @ torch.linalg.solve(gram, torch.eye(
             len(gram), dtype=gram.dtype, device=gram.device))
@@ -95,7 +135,7 @@ class NativeHead:
             self._cache[key] = (indices, positions, mapping, affected)
         return self._cache[key]
 
-    def projected_outputs(self, m, b, g, queries, shift=None, arm='steer', raw_queries=None, query_shift=None):
+    def projected_outputs(self, m, b, g, queries, shift=None, arm='steer', raw_queries=None, query_shift=None, hidden_shift=None):
         indices, positions, mapping, affected = self.prepared(m, b, g, arm)
         qp = torch.tensor([mapping[i] for i in queries], device=self.h.device)
         keys, values = self.k[indices], self.v[indices]
@@ -108,16 +148,33 @@ class NativeHead:
             if query_shift is None:
                 query_shift = self.w['wq'] @ (self.lift @ shift)
             raw = raw + affected[qp, None] * query_shift
-        q = rope(rmsnorm(raw, self.w['qnorm'], self.w['epsilon']), qp, self.theta)
-        k = rope(rmsnorm(keys, self.w['knorm'], self.w['epsilon']), positions, self.theta)
+        if self.whole_norm:
+            full_q, full_k = self.q_full[queries].clone(), self.k_full[indices]
+            if shift is not None:
+                displacement = self.lift @ shift if hidden_shift is None else hidden_shift
+                full_k = full_k + affected[:, None] * (self.w['wk_full'] @ displacement)
+                full_q = full_q + affected[qp, None] * (self.w['wq_full'] @ displacement)
+            start = self.w['q_head_start']
+            full_q[:, start:start+raw.shape[-1]] = raw
+            q = raw * torch.rsqrt(full_q.square().mean(-1, keepdim=True) + self.w['epsilon']) * self.w['qnorm']
+            k = keys * torch.rsqrt(full_k.square().mean(-1, keepdim=True) + self.w['epsilon']) * self.w['knorm']
+        else:
+            q = rmsnorm(raw, self.w['qnorm'], self.w['epsilon'])
+            k = rmsnorm(keys, self.w['knorm'], self.w['epsilon'])
+        frequencies, scaling = self.w.get('rope_inv_freq'), self.w.get('rope_scaling', 1.)
+        q = rope(q, qp, self.theta, frequencies, scaling)
+        k = rope(k, positions, self.theta, frequencies, scaling)
         scores = q @ k.T / math.sqrt(k.shape[-1])
         scores = scores.masked_fill(positions[None] > qp[:, None], -torch.inf)
+        window = self.w.get('sliding_window')
+        if window is not None:
+            scores = scores.masked_fill(positions[None] <= qp[:, None] - window, -torch.inf)
         return scores.softmax(-1) @ values
 
     def outputs(self, m, b, g, queries, r=None, arm='steer', raw_queries=None):
         shift = None if r is None else self.projection @ r
         query_shift = None if r is None else self.w['wq'] @ r
-        return self.projected_outputs(m, b, g, queries, shift, arm, raw_queries, query_shift)
+        return self.projected_outputs(m, b, g, queries, shift, arm, raw_queries, query_shift, r)
 
     def theoretical_directions(self, m, b, g):
         """Original linear-key diagnostic; NOT a native-attention theorem."""

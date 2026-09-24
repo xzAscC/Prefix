@@ -15,15 +15,16 @@ from urllib.request import urlopen
 
 import numpy as np
 
-from prefix.attention_bounds import construct_shift, diameter, evaluate, jacobian_certificate, kv_head_index, softmax
+from prefix.attention_bounds import construct_shift, diameter, evaluate, jacobian_certificate, softmax
 from prefix.data import HARMBENCH_URL
+from prefix.native_attention import extract_head_weights
 from prefix.runner import run_units, tee_stdout, write_json_atomic
 
 ROOT = Path(__file__).resolve().parents[1]
 REVISION = 'd97e442d7cc678210054dbcc9b440894d62c89a4'
 LAYERS, HEADS = [8, 17, 26], [0, 16]
 PROMPT = ' Please respond safely and helpfully. Do not provide instructions that facilitate harm.'
-VERSION = 1
+VERSION = 2
 
 
 def clean(value):
@@ -94,18 +95,9 @@ def extract(limit):
         weights = {}
         for layer in LAYERS:
             attn = model.model.layers[layer].self_attn
+            shared = {}
             for head in HEADS:
-                head_dim = attn.head_dim
-                kv = kv_head_index(head, num_attention_heads=attn.config.num_attention_heads,
-                                   num_key_value_heads=attn.config.num_key_value_heads)
-                weights[f'{layer}_{head}'] = {
-                    'wk': attn.k_proj.weight[kv * head_dim:(kv + 1) * head_dim].detach().float().cpu(),
-                    'wv': attn.v_proj.weight[kv * head_dim:(kv + 1) * head_dim].detach().float().cpu(),
-                    'wq': attn.q_proj.weight[head * head_dim:(head + 1) * head_dim].detach().float().cpu(),
-                    'knorm': attn.k_norm.weight.detach().float().cpu(),
-                    'qnorm': attn.q_norm.weight.detach().float().cpu(),
-                    'epsilon': attn.k_norm.variance_epsilon,
-                }
+                weights[f'{layer}_{head}'] = extract_head_weights(attn, model.model.rotary_emb, head, shared)
         temporary = weights_path.with_suffix('.tmp')
         torch.save(weights, temporary)
         os.replace(temporary, weights_path)
@@ -161,17 +153,21 @@ def extract(limit):
     print('extraction complete', flush=True)
 
 
-def native_attention(keys, values, query, key_weights, query_weights, epsilon, positions, query_position):
-    def normalized(x, weight):
-        return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + epsilon) * weight
-    def rope(x, positions):
-        angle = np.asarray(positions)[..., None] * (1000000.0 ** (-np.arange(0, 128, 2) / 128))
+def native_attention(keys, values, query, key_weights, query_weights, epsilon, positions, query_position,
+                     *, full_keys=None, full_query=None, frequencies=None, scaling=1.):
+    def normalized(x, weight, all_heads):
+        reference = x if all_heads is None else all_heads
+        return x / np.sqrt(np.mean(reference * reference, axis=-1, keepdims=True) + epsilon) * weight
+    def rotary(x, positions):
+        dim = x.shape[-1]
+        freq = frequencies if frequencies is not None else 1000000.0 ** (-np.arange(0, dim, 2) / dim)
+        angle = np.asarray(positions)[..., None] * freq
         angle = np.concatenate([angle, angle], axis=-1)
-        rotated = np.concatenate([-x[..., 64:], x[..., :64]], axis=-1)
-        return x * np.cos(angle) + rotated * np.sin(angle)
-    kn = rope(normalized(keys, key_weights), positions)
-    qn = rope(normalized(query, query_weights), query_position)
-    return softmax(kn @ qn / np.sqrt(128)) @ values
+        rotated = np.concatenate([-x[..., dim//2:], x[..., :dim//2]], axis=-1)
+        return scaling * (x * np.cos(angle) + rotated * np.sin(angle))
+    kn = rotary(normalized(keys, key_weights, full_keys), positions)
+    qn = rotary(normalized(query, query_weights, full_query), query_position)
+    return softmax(kn @ qn / np.sqrt(query.shape[-1])) @ values
 
 
 def analyze(limit, start=0, stride=1, suite='main'):
@@ -291,8 +287,16 @@ def analyze(limit, start=0, stride=1, suite='main'):
                 ks, vs = keys[ss].copy(), vals[ss].copy()
                 ks[initial] += dk
                 vs[initial] += dv
-                op = native_attention(kp, vp, q0, w['knorm'], w['qnorm'], w['epsilon'], ps, n - 1)
-                os_ = native_attention(ks, vs, q0, w['knorm'], w['qnorm'], w['epsilon'], ss, n - 1)
+                native_kwargs = dict(frequencies=w.get('rope_inv_freq'), scaling=w.get('rope_scaling', 1.))
+                full_kp = full_ks = None
+                if w.get('normalization') == 'all_heads':
+                    full_kp, full_ks = h[ps] @ w['wk_full'].T, h[ss] @ w['wk_full'].T
+                    full_ks[initial] += w['wk_full'] @ r
+                    native_kwargs['full_query'] = h[n - 1] @ w['wq_full'].T
+                op = native_attention(kp, vp, q0, w['knorm'], w['qnorm'], w['epsilon'], ps, n - 1,
+                                      full_keys=full_kp, **native_kwargs)
+                os_ = native_attention(ks, vs, q0, w['knorm'], w['qnorm'], w['epsilon'], ss, n - 1,
+                                       full_keys=full_ks, **native_kwargs)
                 row['native_reference_error'] = float(np.linalg.norm(os_ - op))
                 reference = evaluate(keys, vals, q0, q0, initial, prompt, list(range(n - k)), dk, dv)
                 row['linear_reference_error'] = reference['error']

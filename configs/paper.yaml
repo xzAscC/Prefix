@@ -1,0 +1,46 @@
+# Reproduction protocol for iclr2027; layers in code are zero-based.
+models:
+  qwen3-1.7b:
+    id: Qwen/Qwen3-1.7B
+    revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  qwen3-14b:
+    id: Qwen/Qwen3-14B
+    revision: 40c069824f4251a91eefaf281ebe4c544efd3e18
+  olmo3-7b:
+    id: allenai/Olmo-3-7B-Think
+    revision: d97e442d7cc678210054dbcc9b440894d62c89a4
+    alternative_policies: true
+  olmo3-32b:
+    id: allenai/Olmo-3-32B-Think
+    revision: f2edda15216e738ef2bb73771e11890e152b2112
+tasks: [safety, sentiment, politeness, boxed, plain]
+judge:
+  model: gemini-3.5-flash
+  region: global
+protocol:
+  seed: 42
+  n_direction: 100
+  n_tune: 50
+  layer_fractions: [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+  additive_strengths: [0.01, 0.1, 1.0, 10.0]
+  coast_angles: [10, 30, 50, 70, 90]
+  prefix_lengths: [1, 5]
+  capability_floor: 0.9
+  duration_layer: 17  # displayed layer 18
+  duration_lengths: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  linear_horizon: 128
+  exponential_tau: 128
+  das_top_p: 0.9
+  das_maximum: 2.0
+  act_amplitude: 12.0
+  act_bias: 0.0
+  probe_regularization: 0.01
+  probe_max_iter: 100
+  generation:
+    concept: 512
+    mmlu: 1024
+    math: 4096
+  thinking:
+    concept: false
+    mmlu: true
+    math: true

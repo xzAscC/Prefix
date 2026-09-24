@@ -56,7 +56,8 @@ def test_single_position_matching_strength_has_zero_error():
     torch.testing.assert_close(left, right, atol=0., rtol=0.)
 
 
-def test_frozen_output_replay_supports_native_olmo3_attention():
+@pytest.mark.parametrize("layer_type", ["full_attention", "sliding_attention"])
+def test_frozen_output_replay_supports_native_olmo3_attention(layer_type):
     from transformers import Olmo3Config
     from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention, Olmo3RotaryEmbedding
 
@@ -64,13 +65,16 @@ def test_frozen_output_replay_supports_native_olmo3_attention():
     cfg = Olmo3Config(vocab_size=32, hidden_size=16, intermediate_size=32,
                       num_attention_heads=2, num_key_value_heads=2,
                       num_hidden_layers=1, head_dim=8,
-                      layer_types=["full_attention"], eos_token_id=31)
+                      layer_types=[layer_type], sliding_window=3, eos_token_id=31)
     cfg._attn_implementation = "eager"
     attn = Olmo3Attention(cfg, 0).eval()
     hidden = torch.randn(1, 10, 16)
     rotary = Olmo3RotaryEmbedding(cfg)
-    embeddings = rotary(hidden, torch.arange(10)[None])
+    embeddings = rotary(hidden, torch.arange(10)[None], layer_type=layer_type)
     mask = torch.full((1, 1, 10, 10), -torch.inf).triu(1)
+    if layer_type == "sliding_attention":
+        positions = torch.arange(10)
+        mask.masked_fill_(positions[None, :] <= positions[:, None] - 3, -torch.inf)
     captured = []
     handle = attn.o_proj.register_forward_pre_hook(
         lambda _module, args: captured.append(args[0].detach()))

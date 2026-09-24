@@ -71,3 +71,33 @@ def test_experiment_never_imports_email_notifications():
     tree = ast.parse(Path(module.__file__).read_text())
     assert not any(isinstance(node, ast.ImportFrom) and node.module == 'prefix.notify'
                    for node in ast.walk(tree))
+
+
+def test_architecture_control_uses_full_olmo_norm_and_native_rotary():
+    import numpy as np
+    import torch
+    from transformers import Olmo3Config
+    from transformers.models.olmo3.modeling_olmo3 import Olmo3Attention, Olmo3RotaryEmbedding
+    from prefix.native_attention import extract_head_weights
+    torch.manual_seed(44)
+    config = Olmo3Config(hidden_size=12, intermediate_size=24, num_hidden_layers=1,
+                        num_attention_heads=2, num_key_value_heads=2, head_dim=4,
+                        layer_types=['full_attention'], rope_parameters={'full_attention': {'rope_type': 'default', 'rope_theta': 500000.}})
+    config._attn_implementation = 'eager'
+    attention = Olmo3Attention(config, 0).eval()
+    rotary = Olmo3RotaryEmbedding(config)
+    h = torch.randn(1, 6, 12)
+    captured = []
+    handle = attention.o_proj.register_forward_pre_hook(lambda _, args: captured.append(args[0].detach()))
+    positions = torch.arange(6)[None]
+    with torch.no_grad():
+        attention(h, rotary(h, positions, layer_type='full_attention'), torch.full((1, 1, 6, 6), -torch.inf).triu(1))
+    handle.remove()
+    w = {key: value.numpy().astype(np.float64) if torch.is_tensor(value) else value
+         for key, value in extract_head_weights(attention, rotary, 1).items()}
+    states = h[0].numpy().astype(np.float64)
+    result = module.native_attention(states @ w['wk'].T, states @ w['wv'].T, states[-1] @ w['wq'].T,
+                                     w['knorm'], w['qnorm'], w['epsilon'], np.arange(6), 5,
+                                     full_keys=states @ w['wk_full'].T, full_query=states[-1] @ w['wq_full'].T,
+                                     frequencies=w['rope_inv_freq'], scaling=w['rope_scaling'])
+    np.testing.assert_allclose(result, captured[0][0, -1, 4:8].numpy(), atol=1e-6, rtol=1e-5)
