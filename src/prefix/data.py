@@ -6,6 +6,7 @@ import io
 import json
 import os
 import random
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import cast
@@ -26,6 +27,13 @@ _LLM_LAT_REVISIONS = {
 }
 MMLU_PRO_TEST_SIZE = 12032
 _ANSWER_LETTERS = "ABCDEFGHIJ"
+
+
+def llm_lat_revision(dataset: str) -> str:
+    try:
+        return _LLM_LAT_REVISIONS[dataset]
+    except KeyError as error:
+        raise ValueError(f"unsupported LLM-LAT dataset: {dataset}") from error
 
 
 def _default_cache_dir(cache_dir: Path | None) -> Path:
@@ -53,32 +61,151 @@ def _field_or(row: Mapping[str, object], name: str, fallback: str) -> object:
         return _field(row, fallback)
 
 
+def _optional_field(row: Mapping[str, object], *names: str) -> object | None:
+    for name in names:
+        try:
+            return _field(row, name)
+        except KeyError:
+            continue
+    return None
+
+
+class _HarmBenchRecord(dict[str, object]):
+    def __init__(self, behavior: str, category: str, **metadata: object) -> None:
+        super().__init__(behavior=behavior, category=category)
+        self._metadata = {
+            key: value for key, value in metadata.items() if value is not None
+        }
+
+    def __getitem__(self, key: str) -> object:
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            if key in self._metadata:
+                return self._metadata[key]
+            raise
+
+    def get(self, key: str, default: object = None) -> object:
+        if key in self._metadata:
+            return self._metadata[key]
+        return super().get(key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(key) or key in self._metadata
+
+    @property
+    def metadata(self) -> dict[str, object]:
+        return dict(self._metadata)
+
+
+def _harmbench_record(row: Mapping[str, object]) -> _HarmBenchRecord:
+    behavior = str(_field(row, "behavior"))
+    category = str(
+        _optional_field(row, "semanticcategory", "category", "functionalcategory")
+    )
+    metadata = {
+        "behavior_id": _optional_field(row, "behaviorid", "behavior_id"),
+        "functional_category": _optional_field(
+            row, "functionalcategory", "functional_category"
+        ),
+        "context": _optional_field(row, "contextstring", "context"),
+        "tags": _optional_field(row, "tags"),
+    }
+    return _HarmBenchRecord(behavior, category, **metadata)
+
+
+def _normalized_harmbench_behavior(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
+def _harmbench_cache_row(record: Mapping[str, object]) -> dict[str, object]:
+    cached = dict(record)
+    metadata = getattr(record, "metadata", {})
+    if isinstance(metadata, dict):
+        cached.update(metadata)
+    return cached
+
+
 def _fetch_harmbench(url: str) -> str:
     with urlopen(url) as response:  # noqa: S310 - URL is a module constant or injected.
         return response.read().decode("utf-8")
 
 
 def load_harmbench(
-    cache_dir: Path | None = None, fetch: Callable[[str], str] | None = None
+    cache_dir: Path | None = None,
+    fetch: Callable[[str], str] | None = None,
+    *,
+    offline: bool = False,
 ) -> list[dict[str, object]]:
     directory = _default_cache_dir(cache_dir)
     digest = hashlib.sha256(HARMBENCH_URL.encode("utf-8")).hexdigest()
     cache_path = directory / f"harmbench_{digest}.json"
     if cache_path.exists():
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        return [_harmbench_record(row) for row in cached]
+
+    if offline:
+        raise FileNotFoundError(f"offline HarmBench cache is missing: {cache_path}")
 
     text = (fetch or _fetch_harmbench)(HARMBENCH_URL)
     rows = csv.DictReader(io.StringIO(text))
-    records: list[dict[str, object]] = []
+    records: list[_HarmBenchRecord] = []
     for row in rows:
-        behavior = str(_field(row, "behavior"))
-        category = str(_field_or(row, "semanticcategory", "functionalcategory"))
-        records.append({"behavior": behavior, "category": category})
+        records.append(_harmbench_record(row))
     if len(records) != 400:
         raise ValueError(f"HarmBench CSV yielded {len(records)} records, expected 400")
     records.sort(key=lambda record: (record["category"], record["behavior"]))
-    cache_path.write_text(json.dumps(records), encoding="utf-8")
-    return records
+    cache_path.write_text(
+        json.dumps([_harmbench_cache_row(record) for record in records]),
+        encoding="utf-8",
+    )
+    return cast(list[dict[str, object]], records)
+
+
+def harmbench_selection(
+    records: Iterable[Mapping[str, object]], n_per_category: int = 22, seed: int = 42
+) -> list[dict[str, object]]:
+    if n_per_category < 0:
+        raise ValueError("n_per_category must be non-negative")
+
+    candidates = sorted(
+        (_harmbench_cache_row(record) for record in records),
+        key=lambda record: (
+            _normalized_harmbench_behavior(str(_field(record, "behavior"))),
+            str(_field(record, "category")),
+            str(_optional_field(record, "behaviorid", "behavior_id")),
+            str(_field(record, "behavior")),
+        ),
+    )
+    unique: dict[str, dict[str, object]] = {}
+    for record in candidates:
+        normalized = _normalized_harmbench_behavior(str(_field(record, "behavior")))
+        unique.setdefault(normalized, record)
+
+    ranked: list[tuple[str, str, dict[str, object]]] = []
+    for normalized, record in unique.items():
+        category = str(_field(record, "category"))
+        digest = hashlib.sha256(f"{seed}\0{normalized}".encode("utf-8")).hexdigest()
+        ranked.append((category, digest, record))
+
+    by_category: dict[str, list[tuple[str, dict[str, object]]]] = {}
+    for category, digest, record in ranked:
+        by_category.setdefault(category, []).append((digest, record))
+    for category, category_records in by_category.items():
+        if len(category_records) < n_per_category:
+            raise ValueError(
+                f"HarmBench category {category!r} has {len(category_records)} "
+                f"unique behaviors; need {n_per_category}"
+            )
+        category_records.sort(key=lambda item: item[0])
+
+    selected: list[dict[str, object]] = []
+    for category in sorted(by_category):
+        for digest, record in by_category[category][:n_per_category]:
+            output = dict(record)
+            output["id"] = f"harmbench-{seed}-{digest}"
+            selected.append(output)
+    return selected
 
 
 def validate_offline_dataset_caches(cache_dir: Path) -> dict[str, int]:

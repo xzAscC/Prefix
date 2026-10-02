@@ -15,6 +15,7 @@ from prefix import no_steering
 
 
 ROOT = Path(__file__).parents[1]
+_MISSING = object()
 
 
 def _module(name: str) -> ModuleType:
@@ -42,6 +43,8 @@ def _formal_fixture(
     summary_ppl: dict[str, object] | None = None,
     conditional_ppl: dict[str, object] | None = None,
     aggregate_roots: bool = True,
+    schema_version: int = 1,
+    finish_reason: object = _MISSING,
 ) -> tuple[ModuleType, Path, Path]:
     formal = _module("validate_no_steering_formal")
     model_id = "Qwen/Qwen3-4B"
@@ -56,7 +59,7 @@ def _formal_fixture(
     checkpoint.mkdir(parents=True)
     result.mkdir(parents=True)
     config = {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "model_id": model_id,
         "model_slug": spec.slug,
         "model_revision": spec.revision,
@@ -86,6 +89,15 @@ def _formal_fixture(
             }
         },
         "benchmark_ids": {"mmlu_pro": ["m0"]},
+        "benchmark_content_sha256": {
+            "mmlu_pro": hashlib.sha256(
+                json.dumps(
+                    [{"id": "m0", "content": {}}],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        },
     }
     (checkpoint / "manifest.json").write_text(
         json.dumps({"config_sha256": _config_digest(config), "config": config})
@@ -93,22 +105,18 @@ def _formal_fixture(
     response = checkpoint / "mmlu_pro" / "responses.jsonl"
     response.parent.mkdir()
     values = logprobs if logprobs is not None else [-0.5, -1.0]
-    response.write_text(
-        json.dumps(
-            {
-                "id": "m0",
-                "benchmark": "mmlu_pro",
-                "model_id": model_id,
-                "status": "ok",
-                "generated_token_count": len(values),
-                "selected_generated_token_logprobs": values,
-                "metadata": {
-                    "provenance": {"model_id": model_id, "revision": spec.revision}
-                },
-            }
-        )
-        + "\n"
-    )
+    response_row: dict[str, object] = {
+        "id": "m0",
+        "benchmark": "mmlu_pro",
+        "model_id": model_id,
+        "status": "ok",
+        "generated_token_count": len(values),
+        "selected_generated_token_logprobs": values,
+        "metadata": {"provenance": {"model_id": model_id, "revision": spec.revision}},
+    }
+    if finish_reason is not _MISSING:
+        response_row["finish_reason"] = finish_reason
+    response.write_text(json.dumps(response_row) + "\n")
     expected_ppl = math.exp(-sum(values) / len(values))
     payload = summary_ppl or {
         "ppl": expected_ppl,
@@ -130,6 +138,94 @@ def _formal_fixture(
         json.dumps(conditional_ppl if conditional_ppl is not None else payload)
     )
     return formal, checkpoint, result
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "stop"])
+def test_schema_v2_requires_and_validates_finish_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+) -> None:
+    formal, checkpoint, result = _formal_fixture(
+        tmp_path,
+        monkeypatch,
+        schema_version=2,
+        finish_reason=finish_reason,
+    )
+
+    formal.main(
+        [
+            "--result-root",
+            str(result),
+            "--checkpoint-root",
+            str(checkpoint),
+            "--model-id",
+            "Qwen/Qwen3-4B",
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_error"),
+    [(None, "finish_reason"), ("eos", "finish_reason")],
+)
+def test_schema_v2_rejects_missing_or_invalid_finish_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: object,
+    expected_error: str,
+) -> None:
+    if finish_reason is None:
+        formal, checkpoint, result = _formal_fixture(
+            tmp_path, monkeypatch, schema_version=2
+        )
+    else:
+        formal, checkpoint, result = _formal_fixture(
+            tmp_path,
+            monkeypatch,
+            schema_version=2,
+            finish_reason=finish_reason,
+        )
+
+    with pytest.raises(ValueError, match=expected_error):
+        formal.main(
+            [
+                "--result-root",
+                str(result),
+                "--checkpoint-root",
+                str(checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )
+
+
+def test_schema_v1_preserves_explicit_legacy_unavailable_finish_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(
+        tmp_path,
+        monkeypatch,
+        schema_version=1,
+        finish_reason="unavailable",
+    )
+
+    formal.main(
+        [
+            "--result-root",
+            str(result),
+            "--checkpoint-root",
+            str(checkpoint),
+            "--model-id",
+            "Qwen/Qwen3-4B",
+        ]
+    )
+    assert (
+        json.loads((checkpoint / "mmlu_pro" / "responses.jsonl").read_text())[
+            "finish_reason"
+        ]
+        == "unavailable"
+    )
 
 
 def test_formal_validator_unwraps_runner_manifest_and_uses_checkpoint_responses(
@@ -535,6 +631,15 @@ def test_finalizer_rejects_changed_bound_response_content(tmp_path: Path) -> Non
         score = model_root / benchmark / "scores.jsonl"
         score.parent.mkdir(parents=True, exist_ok=True)
         score.write_text("")
+    score_files = {
+        benchmark: {
+            "path": str((model_root / benchmark / "scores.jsonl").resolve()),
+            "content_sha256": hashlib.sha256(
+                (model_root / benchmark / "scores.jsonl").read_bytes()
+            ).hexdigest(),
+        }
+        for benchmark in finalizer.DATASET_SCOPES
+    }
     manifest = {
         "schema_version": 1,
         "model_id": model_id,
@@ -551,6 +656,7 @@ def test_finalizer_rejects_changed_bound_response_content(tmp_path: Path) -> Non
             }
             for benchmark in finalizer.DATASET_SCOPES
         },
+        "score_files": score_files,
     }
     (model_root / "scoring_manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="digest"):
@@ -627,3 +733,200 @@ def test_smoke_validator_accepts_complete_canonical_ppl_summary(
     smoke.validate_smoke_roots(
         result_root=result, checkpoint_root=checkpoint, model_id=model_id
     )
+
+
+def test_smoke_validator_accepts_schema_v2_manifest_from_run_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _module("validate_no_steering_smoke")
+    producer = _module("run_no_steering")
+    model_id = "Qwen/Qwen3-4B"
+    scopes = {
+        "harmbench": {"count": 1, "split": "test"},
+        "mmlu_pro": {"count": 1, "split": "test"},
+        "math500": {"count": 1, "split": "test"},
+    }
+    monkeypatch.setattr(smoke, "DATASET_SCOPES", scopes)
+    monkeypatch.setattr(producer, "DATASET_SCOPES", scopes)
+    benchmarks = {
+        "harmbench": [{"id": "h0", "behavior": "test behavior"}],
+        "mmlu_pro": [{"id": "m0", "question": "1+1?", "options": ["1", "2"]}],
+        "math500": [{"id": "x0", "problem": "1+1", "answer": "2"}],
+    }
+    checkpoint = tmp_path / "checkpoints"
+    result = tmp_path / "results"
+    spec = no_steering.model_spec(model_id)
+    checkpoint_model = checkpoint / spec.slug
+    result_model = result / spec.slug
+    checkpoint_model.mkdir(parents=True)
+    result_model.mkdir(parents=True)
+    config = producer.checkpoint_manifest(
+        benchmarks,
+        model_id=model_id,
+        sampling={
+            "max_tokens": 1024,
+            "temperature": 0.0,
+            "logprobs": 1,
+        },
+        batch_prompts=1,
+        max_model_len=8192,
+        output_roots={"checkpoint": str(checkpoint), "output": str(result)},
+        limited=True,
+    )
+    (checkpoint_model / "manifest.json").write_text(
+        json.dumps(
+            {"config": config, "config_sha256": _config_digest(config)},
+            sort_keys=True,
+        )
+    )
+    for benchmark, rows in benchmarks.items():
+        row = rows[0]
+        metadata: dict[str, object] = {
+            key: value for key, value in row.items() if key != "id"
+        }
+        metadata["provenance"] = {
+            "model_id": model_id,
+            "revision": spec.revision,
+        }
+        response = checkpoint_model / benchmark / "responses.jsonl"
+        response.parent.mkdir()
+        response.write_text(
+            json.dumps(
+                {
+                    "id": row["id"],
+                    "benchmark": benchmark,
+                    "model_id": model_id,
+                    "status": "ok",
+                    "finish_reason": "stop",
+                    "generated_token_count": 1,
+                    "selected_generated_token_logprobs": [-0.5],
+                    "metadata": metadata,
+                }
+            )
+            + "\n"
+        )
+    (result_model / "summary.json").write_text(
+        json.dumps(
+            {
+                "provenance": {"model_id": model_id, "revision": spec.revision},
+                "limited": True,
+                "ppl": {
+                    "ppl": 1.5,
+                    "selected_token_count": 3,
+                    "generated_token_count": 3,
+                    "covered_records": 3,
+                    "total_records": 3,
+                    "coverage_ratio": 1.0,
+                },
+            }
+        )
+    )
+
+    smoke.validate_smoke_roots(
+        result_root=result_model,
+        checkpoint_root=checkpoint_model,
+        model_id=model_id,
+    )
+
+    response_path = checkpoint_model / "harmbench" / "responses.jsonl"
+    response = json.loads(response_path.read_text())
+    response["finish_reason"] = "eos"
+    response_path.write_text(json.dumps(response) + "\n")
+    with pytest.raises(ValueError, match="finish_reason"):
+        smoke.validate_smoke_roots(
+            result_root=result_model,
+            checkpoint_root=checkpoint_model,
+            model_id=model_id,
+        )
+    response["finish_reason"] = "stop"
+    response_path.write_text(json.dumps(response) + "\n")
+
+    manifest_path = checkpoint_model / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["benchmark_content_sha256"]["harmbench"] = "0" * 64
+    manifest["config_sha256"] = _config_digest(manifest["config"])
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True))
+    with pytest.raises(ValueError, match="content digest"):
+        smoke.validate_smoke_roots(
+            result_root=result_model,
+            checkpoint_root=checkpoint_model,
+            model_id=model_id,
+        )
+
+
+def test_smoke_marker_rejects_empty_stale_wrong_model_and_wrong_job(
+    tmp_path: Path,
+) -> None:
+    smoke = _module("validate_no_steering_smoke")
+    marker = tmp_path / "preflight.ok"
+    marker.write_text("", encoding="utf-8")
+    for model_id, job_id in (
+        ("Qwen/Qwen3-4B", "job-1"),
+        ("Qwen/Qwen3-14B", "job-1"),
+        ("Qwen/Qwen3-4B", "job-2"),
+    ):
+        marker.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "complete",
+                    "preflight_job_id": "job-1",
+                    "run_root": str(tmp_path / "run"),
+                    "models": {model_id: {"model_id": model_id}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="marker|model|job|digest"):
+            smoke.validate_preflight_marker(
+                marker,
+                model_id=model_id,
+                run_root=tmp_path / "run",
+                preflight_job_id=job_id,
+            )
+
+
+def test_formal_validator_rejects_child_response_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(tmp_path, monkeypatch)
+    real = tmp_path / "real-responses.jsonl"
+    response = checkpoint / "mmlu_pro" / "responses.jsonl"
+    real.write_bytes(response.read_bytes())
+    response.unlink()
+    response.symlink_to(real)
+    with pytest.raises(ValueError, match="symlink"):
+        formal.main(
+            [
+                "--result-root",
+                str(result),
+                "--checkpoint-root",
+                str(checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )
+
+
+def test_formal_validator_rejects_harmbench_content_digest_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    formal, checkpoint, result = _formal_fixture(
+        tmp_path, monkeypatch, schema_version=2, finish_reason="stop"
+    )
+    manifest_path = checkpoint / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["config"]["benchmark_content_sha256"] = {"mmlu_pro": "0" * 64}
+    manifest["config_sha256"] = _config_digest(manifest["config"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="content|digest"):
+        formal.main(
+            [
+                "--result-root",
+                str(result),
+                "--checkpoint-root",
+                str(checkpoint),
+                "--model-id",
+                "Qwen/Qwen3-4B",
+            ]
+        )

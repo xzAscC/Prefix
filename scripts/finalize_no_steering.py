@@ -2,27 +2,33 @@ from __future__ import annotations
 
 """Validate a complete batch and deliver its single completion notification.
 
-Notification state is deliberately at-most-once across ambiguous crashes:
-``missing -> claimed -> sent`` and known send failures become ``failed``.
-Only ``failed`` is retried.  A durable pre-existing ``claimed`` state means
-SMTP may already have accepted the message, so it suppresses another send.
+Notification state records workflow and delivery independently.  Known send
+failures become retryable ``failed`` delivery, while ambiguous SMTP outcomes
+remain ``claimed`` and suppress another send.
 """
 
 import argparse
-import fcntl
 import hashlib
 import importlib.util
 import json
 import os
 import sys
-import tempfile
+import traceback
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, TextIO, cast
 
 from prefix.judge import MATH_PROMPT, SAFETY_PROMPT
 from prefix.no_steering import DATASET_SCOPES, MODEL_MATRIX, model_spec
-from prefix.notify import send_batch_notification
+from prefix.notify import (
+    AmbiguousDeliveryError,
+    _claim_failed_notification as _durable_claim_failed,
+    _claim_notification_state as _durable_claim,
+    _notification_status as _durable_status,
+    _write_notification_state as _durable_write,
+    finalize_terminal_notification,
+    send_batch_notification,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -160,12 +166,21 @@ def validate_scoring(
         response_files = manifest.get("response_files")
         if not isinstance(response_files, dict):
             raise ValueError(f"scoring manifest lacks response bindings for {model_id}")
+        score_files = manifest.get("score_files")
+        if not isinstance(score_files, dict):
+            raise ValueError(f"scoring manifest lacks score bindings for {model_id}")
+        if set(score_files) != set(DATASET_SCOPES):
+            raise ValueError(f"score manifest coverage mismatch for {model_id}")
         response_root = manifest.get("response_root")
         if not isinstance(response_root, str):
             raise ValueError(f"scoring manifest lacks response root for {model_id}")
-        expected_response_root = Path(response_root).resolve()
+        response_root_path = Path(response_root)
+        _reject_persistence_symlinks(response_root_path)
+        expected_response_root = response_root_path.resolve()
         if generation_checkpoint_root is not None:
-            selected_root = Path(generation_checkpoint_root).resolve()
+            selected_root_path = Path(generation_checkpoint_root)
+            _reject_persistence_symlinks(selected_root_path)
+            selected_root = selected_root_path.resolve()
             if expected_response_root != selected_root:
                 raise ValueError(
                     f"scoring manifest response root mismatch for {model_id}: "
@@ -175,6 +190,24 @@ def validate_scoring(
         rows: list[dict[str, object]] = []
         for benchmark in DATASET_SCOPES:
             path = root / model_spec(model_id).slug / benchmark / "scores.jsonl"
+            _reject_persistence_symlinks(path)
+            early_bound = response_files.get(benchmark)
+            if isinstance(early_bound, dict) and isinstance(
+                early_bound.get("path"), str
+            ):
+                _reject_persistence_symlinks(Path(early_bound["path"]))
+            early_response_path = (
+                expected_response_root
+                / model_spec(model_id).slug
+                / benchmark
+                / "responses.jsonl"
+            )
+            _reject_persistence_symlinks(early_response_path)
+            early_score_bound = score_files.get(benchmark)
+            if isinstance(early_score_bound, dict) and isinstance(
+                early_score_bound.get("path"), str
+            ):
+                _reject_persistence_symlinks(Path(early_score_bound["path"]))
             benchmark_rows = _read_jsonl(path)
             identifiers: set[str] = set()
             for row in benchmark_rows:
@@ -208,12 +241,14 @@ def validate_scoring(
             ):
                 raise ValueError(f"score manifest lacks ids for {benchmark}")
             response_path = Path(bound["path"])
+            _reject_persistence_symlinks(response_path)
             expected_path = (
                 expected_response_root
                 / model_spec(model_id).slug
                 / benchmark
                 / "responses.jsonl"
             )
+            _reject_persistence_symlinks(expected_path)
             if response_path.resolve() != expected_path:
                 raise ValueError(f"response path is not canonical for {benchmark}")
             if not response_path.exists():
@@ -226,6 +261,22 @@ def validate_scoring(
                 raise ValueError(f"response ids do not match manifest for {benchmark}")
             if identifiers != {str(value) for value in bound["ids"]}:
                 raise ValueError(f"score ids do not match response manifest in {path}")
+            score_bound = score_files.get(benchmark)
+            if (
+                not isinstance(score_bound, dict)
+                or not isinstance(score_bound.get("path"), str)
+                or not isinstance(score_bound.get("content_sha256"), str)
+            ):
+                raise ValueError(f"score manifest lacks binding for {benchmark}")
+            score_path = Path(score_bound["path"])
+            _reject_persistence_symlinks(score_path)
+            expected_score_path = path.resolve()
+            if score_path != expected_score_path:
+                raise ValueError(f"score path is not canonical for {benchmark}")
+            if not score_path.exists():
+                raise ValueError(f"missing bound score file for {benchmark}")
+            if _sha256_file(score_path) != score_bound["content_sha256"]:
+                raise ValueError(f"score content digest mismatch for {benchmark}")
             rows.extend(benchmark_rows)
             counts[benchmark] += len(benchmark_rows)
         runner.validate_score_completeness(rows, limited=False)
@@ -254,52 +305,15 @@ class _Tee:
 
 
 def _atomic_write(path: Path, payload: Mapping[str, object]) -> None:
-    _reject_persistence_symlinks(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    _durable_write(path, payload)
 
 
 def _claim(path: Path, payload: Mapping[str, object]) -> bool:
-    _reject_persistence_symlinks(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    _fsync_directory(path.parent)
-    return True
+    return _durable_claim(path, payload)
 
 
 def _claim_failed(path: Path, payload: Mapping[str, object]) -> bool:
-    _reject_persistence_symlinks(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name(f".{path.name}.lock")
-    _reject_persistence_symlinks(lock_path)
-    with lock_path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            if _existing_status(path) != "failed":
-                return False
-            _atomic_write(path, payload)
-            return True
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    return _durable_claim_failed(path, payload)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -323,15 +337,7 @@ def _reject_persistence_symlinks(path: Path) -> None:
 
 
 def _existing_status(path: Path) -> str:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return "claimed"
-    return (
-        str(payload.get("status", "claimed"))
-        if isinstance(payload, dict)
-        else "claimed"
-    )
+    return _durable_status(path)
 
 
 def finalize(
@@ -342,13 +348,43 @@ def finalize(
     batch_label: str | None = None,
     log_path: str | Path | None = None,
 ) -> str:
-    generation = validate_generation(generation_root)
-    scoring = validate_scoring(
-        scoring_root,
-        generation_checkpoint_root=Path(generation_root) / "checkpoints",
-    )
     label = batch_label or "default"
     task = f"no-steering {label}"
+    state = Path(state_path)
+    try:
+        generation = validate_generation(generation_root)
+        scoring = validate_scoring(
+            scoring_root,
+            generation_checkpoint_root=Path(generation_root) / "checkpoints",
+        )
+    except Exception:
+        details = traceback.format_exc()
+        try:
+            result = finalize_terminal_notification(
+                task,
+                status="failed",
+                state_path=state,
+                details=details,
+            )
+            if result == "sent":
+                print("finalization: failure notification sent")
+            elif result == "failed":
+                print(
+                    "finalization: failure notification was not delivered",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "finalization: failure notification outcome is ambiguous",
+                    file=sys.stderr,
+                )
+        except Exception as finalization_error:
+            print(
+                f"finalization: failed to persist failure notification: {finalization_error}",
+                file=sys.stderr,
+            )
+        raise
+
     details = (
         f"models={generation['models']}; generation_records={generation['records']}; "
         f"scores="
@@ -357,42 +393,20 @@ def finalize(
             for name, count in cast(Mapping[str, int], scoring["counts"]).items()
         )
     )
-    state = Path(state_path)
-    claim = {
-        "event": "completed",
-        "status": "claimed",
-        "notification_attempted": True,
-        "task": task,
-        "details": details,
-    }
-    if not _claim(state, claim):
-        status = _existing_status(state)
-        if status in {"sent", "claimed"}:
-            print(f"finalization: already {status}")
-            return status
-        if status != "failed":
-            print(f"finalization: already {status}")
-            return status
-        if not _claim_failed(state, claim):
-            status = _existing_status(state)
-            print(f"finalization: already {status}")
-            return status
-        print("finalization: retrying failed notification")
-
-    print(f"finalization: claimed ({details})")
-    try:
-        delivered = send_batch_notification(task, "completed", details=details)
-    except Exception as error:
-        print(f"finalization: notification failed: {error}", file=sys.stderr)
-        _atomic_write(state, {**claim, "status": "failed", "error": str(error)})
-        return "failed"
-    if not delivered:
+    result = finalize_terminal_notification(
+        task,
+        status="completed",
+        state_path=state,
+        details=details,
+        sender=lambda: send_batch_notification(task, "completed", details=details),
+    )
+    if result == "sent":
+        print("finalization: notification sent")
+    elif result == "failed":
         print("finalization: notification was not delivered", file=sys.stderr)
-        _atomic_write(state, {**claim, "status": "failed"})
-        return "failed"
-    _atomic_write(state, {**claim, "status": "sent"})
-    print("finalization: notification attempted")
-    return "sent"
+    else:
+        print("finalization: notification outcome is ambiguous", file=sys.stderr)
+    return result
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -407,6 +421,7 @@ def main(argv: list[str] | None = None) -> None:
         "--log-path", type=Path, default=Path("logs/finalize_no_steering.log")
     )
     args = parser.parse_args(argv)
+    _reject_persistence_symlinks(args.log_path)
     args.log_path.parent.mkdir(parents=True, exist_ok=True)
     with args.log_path.open("a", encoding="utf-8") as log:
         original = sys.stdout

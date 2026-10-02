@@ -56,12 +56,37 @@ def _root_matches(
     )
 
 
+def _reject_symlink_components(path: Path) -> None:
+    current = Path(path.anchor) if path.is_absolute() else Path.cwd()
+    for component in path.parts[1:] if path.is_absolute() else path.parts:
+        current /= component
+        if current.is_symlink():
+            raise ValueError(f"formal artifact path is symlinked: {current}")
+
+
+def _content_digest(rows: list[dict[str, object]]) -> str:
+    canonical = []
+    for row in rows:
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            raise ValueError("formal response content metadata is missing")
+        content = {key: value for key, value in metadata.items() if key != "provenance"}
+        canonical.append({"id": row.get("id"), "content": content})
+    return hashlib.sha256(
+        json.dumps(
+            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _validate_response_root(
     root: Path,
     model_id: str,
     expected: dict[str, int],
     revision: str,
     benchmark_ids: dict[str, object],
+    benchmark_content_sha256: dict[str, object] | None = None,
+    schema_version: int = 1,
 ) -> dict[str, float | int]:
     identifiers: set[str] = set()
     selected_token_count = 0
@@ -70,11 +95,13 @@ def _validate_response_root(
     total_nll = 0.0
     for benchmark, count in expected.items():
         path = root / benchmark / "responses.jsonl"
+        _reject_symlink_components(path)
         declared = benchmark_ids.get(benchmark)
         declared_ids = (
             cast(list[object], declared) if isinstance(declared, list) else []
         )
         row_count = 0
+        content_rows: list[dict[str, object]] = []
         with path.open("r", encoding="utf-8") as response_file:
             for line in response_file:
                 if not line.strip():
@@ -92,6 +119,7 @@ def _validate_response_root(
                         f"formal response coverage is incomplete for {benchmark}"
                     )
                 row = cast(dict[str, object], row)
+                content_rows.append(row)
                 if row.get("status") != "ok" or row.get("model_id") != model_id:
                     raise ValueError(
                         "formal response contains an invalid status or model"
@@ -124,6 +152,11 @@ def _validate_response_root(
                     raise ValueError("formal response provenance model mismatch")
                 if provenance.get("revision") != revision:
                     raise ValueError("formal response provenance revision mismatch")
+                if schema_version >= 2 and row.get("finish_reason") not in {
+                    "length",
+                    "stop",
+                }:
+                    raise ValueError("formal response finish_reason is invalid")
                 generated = row.get("generated_token_count")
                 logprobs = row.get("selected_generated_token_logprobs")
                 if (
@@ -157,6 +190,11 @@ def _validate_response_root(
             raise ValueError(f"formal response coverage is incomplete for {benchmark}")
         if len(declared_ids) != row_count:
             raise ValueError(f"formal checkpoint ids mismatch for {benchmark}")
+        if benchmark_content_sha256 is not None:
+            if benchmark_content_sha256.get(benchmark) != _content_digest(content_rows):
+                raise ValueError(
+                    f"formal benchmark content digest mismatch for {benchmark}"
+                )
     if len(identifiers) != sum(expected.values()):
         raise ValueError("formal checkpoint dataset coverage mismatch")
     if selected_token_count == 0:
@@ -205,10 +243,13 @@ def main(argv: list[str] | None = None) -> None:
     checkpoint_root = cast(Path, args.checkpoint_root)
     model_id = cast(str, args.model_id)
     spec = model_spec(model_id)
+    _reject_symlink_components(result_root)
+    _reject_symlink_components(checkpoint_root)
     if checkpoint_root.name != spec.slug or result_root.name != spec.slug:
         raise ValueError("formal roots must be model-scoped")
 
     manifest_path = checkpoint_root / "manifest.json"
+    _reject_symlink_components(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise ValueError("formal checkpoint manifest must be an object")
@@ -218,7 +259,8 @@ def main(argv: list[str] | None = None) -> None:
     if manifest.get("config_sha256") != _config_sha256(cast(dict[str, object], config)):
         raise ValueError("formal checkpoint manifest config digest mismatch")
     config = cast(dict[str, object], config)
-    if config.get("schema_version") != 1:
+    schema_version = config.get("schema_version")
+    if schema_version not in (1, 2):
         raise ValueError("formal checkpoint manifest schema mismatch")
     if config.get("model_id") != model_id:
         raise ValueError("formal checkpoint manifest model mismatch")
@@ -267,11 +309,27 @@ def main(argv: list[str] | None = None) -> None:
     if not isinstance(benchmark_ids, dict):
         raise ValueError("formal checkpoint manifest lacks benchmark ids")
 
+    benchmark_content_sha256 = config.get("benchmark_content_sha256")
+    if schema_version == 2 and (
+        not isinstance(benchmark_content_sha256, dict)
+        or set(benchmark_content_sha256) != set(DATASET_SCOPES)
+    ):
+        raise ValueError("formal manifest lacks benchmark content digests")
     expected_ppl = _validate_response_root(
-        checkpoint_root, model_id, expected, spec.revision, benchmark_ids
+        checkpoint_root,
+        model_id,
+        expected,
+        spec.revision,
+        benchmark_ids,
+        cast(dict[str, object], benchmark_content_sha256)
+        if isinstance(benchmark_content_sha256, dict)
+        else None,
+        schema_version=cast(int, schema_version),
     )
 
     try:
+        _reject_symlink_components(result_root / "summary.json")
+        _reject_symlink_components(result_root / "conditional_ppl.json")
         summary = json.loads((result_root / "summary.json").read_text(encoding="utf-8"))
         conditional = json.loads(
             (result_root / "conditional_ppl.json").read_text(encoding="utf-8")

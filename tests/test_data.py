@@ -5,7 +5,10 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
+from collections import Counter
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -61,6 +64,32 @@ def test_load_harmbench_filters_sorts_and_reuses_cache(tmp_path: Path) -> None:
     assert cached == records
     assert len(calls) == 1
     assert list(tmp_path.glob("*.json"))
+
+
+def test_load_harmbench_offline_cache_miss_fails_before_fetch(tmp_path: Path) -> None:
+    fetched = False
+
+    def fetch(_: str) -> str:
+        nonlocal fetched
+        fetched = True
+        raise AssertionError("offline cache miss must not fetch")
+
+    load_harmbench = cast(Any, data.load_harmbench)
+    with pytest.raises((FileNotFoundError, ValueError), match="cache|offline"):
+        load_harmbench(tmp_path, fetch=fetch, offline=True)
+    assert not fetched
+
+
+def test_harmbench_rows_are_json_serializable_and_retain_all_available_metadata(
+    tmp_path: Path,
+) -> None:
+    csv_text = _harmbench_csv()
+    records = data.load_harmbench(tmp_path, fetch=lambda _: csv_text)
+
+    json.dumps(records)
+    assert records[0]["behavior_id"] == "HB0000"
+    assert records[0]["category"] == "category 0"
+    assert records[0]["context"] == "none"
 
 
 def test_load_harmbench_rejects_unexpected_count(tmp_path: Path) -> None:
@@ -293,3 +322,134 @@ def test_load_llm_lat_rejects_short_dataset() -> None:
             2,
             loader=lambda *args, **kwargs: [{"prompt": "one"}],
         )
+
+
+@pytest.mark.parametrize(
+    ("dataset", "revision"),
+    [
+        (
+            "LLM-LAT/benign-dataset",
+            "799694027732ac7b5633639690a2ea8ed8597f3e",
+        ),
+        (
+            "LLM-LAT/harmful-dataset",
+            "8bfba31bc6d93a5b71808fee5275ef4b6330ed91",
+        ),
+    ],
+)
+def test_public_llm_lat_revision_accessor_returns_pinned_revision(
+    dataset: str, revision: str
+) -> None:
+    assert data.llm_lat_revision(dataset) == revision
+
+
+def _normalized_behavior(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
+def _select_harmbench(records: Any, *, n_per_category: int, seed: int) -> Any:
+    return getattr(data, "harmbench_selection")(
+        records, n_per_category=n_per_category, seed=seed
+    )
+
+
+def test_harmbench_cache_has_global_normalized_uniqueness_and_seven_categories(
+    harmbench_records: list[dict[str, Any]],
+) -> None:
+    records = harmbench_records
+
+    assert len(records) == 400
+    assert len({_normalized_behavior(str(row["behavior"])) for row in records}) == 393
+    assert len({str(row["category"]) for row in records}) == 7
+    assert min(Counter(str(row["category"]) for row in records).values()) == 22
+
+
+def test_harmbench_selection_deduplicates_globally_before_balancing() -> None:
+    rows: list[dict[str, object]] = []
+    for category in ("a", "b"):
+        for index in range(22):
+            rows.append(
+                {
+                    "behavior": f"{category} behavior {index}",
+                    "category": category,
+                    "behavior_id": f"{category}-{index}",
+                }
+            )
+    rows.extend(
+        [
+            {
+                "behavior": "  ＳHARED\u00a0BEHAVIOR \n",
+                "category": "a",
+                "behavior_id": "a-shared",
+            },
+            {"behavior": "shared behavior", "category": "b", "behavior_id": "b-shared"},
+        ]
+    )
+
+    selected = _select_harmbench(rows, n_per_category=22, seed=11)
+    normalized = [_normalized_behavior(str(row["behavior"])) for row in selected]
+
+    assert len(selected) == 44
+    assert len(normalized) == len(set(normalized))
+    assert sum(value == "shared behavior" for value in normalized) == 1
+    assert Counter(str(row["category"]) for row in selected) == {"a": 22, "b": 22}
+
+
+def test_harmbench_selection_is_seeded_hash_stable_and_returns_stable_ids(
+    harmbench_records: list[dict[str, Any]],
+) -> None:
+    records = harmbench_records
+
+    first = _select_harmbench(records, n_per_category=22, seed=37)
+    shuffled = _select_harmbench(list(reversed(records)), n_per_category=22, seed=37)
+    other_seed = _select_harmbench(records, n_per_category=22, seed=38)
+
+    assert first == shuffled
+    assert [row["id"] for row in first] == [row["id"] for row in shuffled]
+    assert [row["id"] for row in first] != [row["id"] for row in other_seed]
+    assert len(first) == 154
+    assert len({row["id"] for row in first}) == 154
+    assert Counter(str(row["category"]) for row in first) == {
+        str(category): 22 for category in {row["category"] for row in records}
+    }
+
+
+def test_harmbench_selection_rejects_a_category_shorter_than_requested(
+    harmbench_records: list[dict[str, Any]],
+) -> None:
+    records = harmbench_records
+
+    with pytest.raises(ValueError, match="harmful.*22"):
+        _select_harmbench(records, n_per_category=23, seed=37)
+
+
+def test_load_harmbench_preserves_source_provenance(tmp_path: Path) -> None:
+    csv_text = _harmbench_csv()
+    records = data.load_harmbench(tmp_path, fetch=lambda _: csv_text)
+
+    assert records[0]["behavior_id"] == "HB0000"
+    assert records[0]["context"] == "none"
+
+
+def test_harmbench_selection_does_not_read_generated_or_judge_labels() -> None:
+    class LabelForbiddenRecord(dict[str, object]):
+        def __getitem__(self, key: str) -> object:
+            if key in {"label", "judge_label", "generated", "response"}:
+                raise AssertionError(f"selection accessed forbidden field: {key}")
+            return super().__getitem__(key)
+
+        def get(self, key: str, default: object = None) -> object:
+            if key in {"label", "judge_label", "generated", "response"}:
+                raise AssertionError(f"selection accessed forbidden field: {key}")
+            return super().get(key, default)
+
+    records = [
+        LabelForbiddenRecord(
+            behavior=f"behavior {index}", category="only", behavior_id=f"HB{index}"
+        )
+        for index in range(22)
+    ]
+
+    selected = _select_harmbench(records, n_per_category=22, seed=37)
+
+    assert len(selected) == 22

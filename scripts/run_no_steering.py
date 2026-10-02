@@ -134,6 +134,26 @@ def benchmark_manifest(
     }
 
 
+def benchmark_content_sha256(
+    benchmarks: Mapping[str, Sequence[Mapping[str, object]]],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for benchmark, rows in benchmarks.items():
+        canonical = [
+            {
+                "id": row.get("id"),
+                "content": {key: value for key, value in row.items() if key != "id"},
+            }
+            for row in rows
+        ]
+        result[benchmark] = hashlib.sha256(
+            json.dumps(
+                canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+    return result
+
+
 def checkpoint_manifest(
     benchmarks: Mapping[str, Sequence[Mapping[str, object]]],
     *,
@@ -146,7 +166,7 @@ def checkpoint_manifest(
 ) -> dict[str, object]:
     spec = model_spec(model_id)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_id": spec.model_id,
         "model_slug": spec.slug,
         "model_revision": spec.revision,
@@ -156,6 +176,7 @@ def checkpoint_manifest(
         "benchmark_ids": {
             name: [str(row["id"]) for row in rows] for name, rows in benchmarks.items()
         },
+        "benchmark_content_sha256": benchmark_content_sha256(benchmarks),
         "prompt_template_version": PROMPT_TEMPLATE_VERSION,
         "sampling": dict(sampling),
         "batch_prompts": batch_prompts,
@@ -210,6 +231,13 @@ def _output_dict(raw_response: Mapping[str, Any]) -> Mapping[str, Any]:
         if isinstance(first, Mapping):
             return first
     return {}
+
+
+def _finish_reason(raw_response: Mapping[str, Any]) -> object:
+    output = _output_dict(raw_response)
+    if "finish_reason" in output:
+        return output["finish_reason"]
+    return raw_response.get("finish_reason")
 
 
 def _selected_logprobs(raw_response: Mapping[str, Any]) -> list[float]:
@@ -822,6 +850,7 @@ def score_phase(
             raise ppl_error
         ppl["ppl"] = no_steering._finalize_ppl(ppl_total_nll, ppl_token_count)
     validate_score_completeness(score_rows, limited=limited)
+    _write_score_manifest_bindings(output_root=output_root, model_id=model_id)
     summary: dict[str, object] = {
         "provenance": runtime_provenance(model_id, sampling={}),
         "limited": limited,
@@ -920,7 +949,12 @@ def _ensure_scoring_manifest(
     )
     if path.exists():
         actual = json.loads(path.read_text(encoding="utf-8"))
-        if actual != expected:
+        comparable = (
+            {key: value for key, value in actual.items() if key != "score_files"}
+            if isinstance(actual, Mapping)
+            else actual
+        )
+        if comparable != expected:
             raise ValueError("stale or unbound scoring manifest")
     else:
         score_paths = [
@@ -935,6 +969,34 @@ def _ensure_scoring_manifest(
                 "missing scoring manifest; refusing orphan score artifact"
             )
         write_json_atomic(path, expected)
+
+
+def _write_score_manifest_bindings(*, output_root: str | Path, model_id: str) -> None:
+    manifest_path = (
+        Path(output_root) / model_spec(model_id).slug / "scoring_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, Mapping):
+        raise ValueError("invalid scoring manifest")
+    score_files = {
+        benchmark: {
+            "path": str(
+                no_steering.output_paths(benchmark, model_id, root=output_root)[
+                    "scores"
+                ].resolve()
+            ),
+            "content_sha256": _sha256_file(
+                no_steering.output_paths(benchmark, model_id, root=output_root)[
+                    "scores"
+                ]
+            ),
+        }
+        for benchmark in DATASET_SCOPES
+    }
+    write_json_atomic(
+        manifest_path,
+        {**cast(dict[str, object], manifest), "score_files": score_files},
+    )
 
 
 def write_aggregate_artifacts(
@@ -1013,6 +1075,8 @@ def evaluate_records(
                 "error": None,
                 "metadata": record.get("metadata", {}),
             }
+            if "finish_reason" in _output_dict(native) or "finish_reason" in native:
+                row["finish_reason"] = _finish_reason(native)
         except Exception as error:
             row = {
                 "id": identifier,
@@ -1117,6 +1181,8 @@ def evaluate_records_batched(
                     "error": None,
                     "metadata": record.get("metadata", {}),
                 }
+                if "finish_reason" in _output_dict(native) or "finish_reason" in native:
+                    row["finish_reason"] = _finish_reason(native)
             except Exception as error:
                 row = _generation_error_row(record, model_id, error)
             batch_rows.append(row)
@@ -1286,13 +1352,17 @@ def _run(args: argparse.Namespace) -> None:
             result: list[Mapping[str, Any]] = []
             for output_obj in output_objects:
                 first = output_obj.outputs[0]
+                output: dict[str, Any] = {
+                    "token_ids": first.token_ids,
+                    "logprobs": first.logprobs,
+                }
+                if hasattr(first, "finish_reason"):
+                    output["finish_reason"] = first.finish_reason
                 result.append(
                     {
                         "text": first.text,
                         "prompt_token_ids": output_obj.prompt_token_ids,
-                        "outputs": [
-                            {"token_ids": first.token_ids, "logprobs": first.logprobs}
-                        ],
+                        "outputs": [output],
                     }
                 )
             return result
@@ -1336,6 +1406,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    parser.add_argument(
+        "--managed-finalizer",
+        action="store_true",
+        help="disable generic notification for an external durable finalizer",
+    )
     args = parser.parse_args(argv)
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be positive")
@@ -1346,7 +1421,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     log_path = ROOT / "logs" / "no_steering.log"
     with notify_on_exit(
-        f"no-steering-{args.model_id}", log_file=log_path, enabled=False
+        f"no-steering-{args.model_id}",
+        log_file=log_path,
+        enabled=not args.managed_finalizer,
     ):
         with tee_stdout(log_path):
             _run(args)

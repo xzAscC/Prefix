@@ -26,3 +26,16 @@ data/*
 !data/.gitkeep
 notebooks/*
 !notebooks/.gitkeep
+
+# local LaTeX projects and build logs
+69bcbe7d4df5c45bb65cfa76/
+6aa4d604d1c9e8e9c1117855/
+6abed8c59c6d0b7f48c5c950/
+texput.log
+
+# cluster-specific launchers and their tests
+scripts/sdsc_*
+scripts/osc_*
+tests/test_*sdsc*.py
+tests/test_*slurm*.py
+tests/test_*notebook.py

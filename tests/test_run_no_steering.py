@@ -271,6 +271,86 @@ def test_raw_response_logprob_schema_and_response_only_ppl_are_preserved(
     assert saved["raw_response"] == raw_response
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "stop"])
+def test_batched_vllm_rows_preserve_finish_reason_and_ppl(
+    tmp_path: Path, finish_reason: str
+) -> None:
+    runner = entrypoint()
+    raw_response = {
+        "text": "answer",
+        "prompt_token_ids": [11],
+        "outputs": [
+            {
+                "token_ids": [21, 22],
+                "logprobs": [{21: {"logprob": -0.5}}, {22: {"logprob": -1.0}}],
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+
+    rows = runner.evaluate_records_batched(
+        [{"id": "r0", "prompt": "p0", "benchmark": "math500"}],
+        model_id=MODEL_IDS[0],
+        generate=lambda prompts, params: [raw_response],
+        output_path=tmp_path / f"{finish_reason}.jsonl",
+        batch_size=1,
+        sampling_params=object(),
+    )
+
+    assert rows[0]["finish_reason"] == finish_reason
+    assert rows[0]["raw_response"]["outputs"][0]["finish_reason"] == finish_reason
+    assert rows[0]["selected_generated_token_logprobs"] == [-0.5, -1.0]
+    assert runner.response_only_ppl(rows) == pytest.approx(exp(1.5 / 2))
+
+
+def test_generation_retry_and_resume_preserve_finish_reason(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    output = tmp_path / "retry-finish-reason.jsonl"
+    record = [{"id": "r0", "prompt": "p0", "benchmark": "math500"}]
+
+    runner.evaluate_records_batched(
+        record,
+        model_id=MODEL_IDS[0],
+        generate=lambda prompts, params: (_ for _ in ()).throw(RuntimeError("first")),
+        output_path=output,
+        batch_size=1,
+        sampling_params=object(),
+    )
+    runner.evaluate_records_batched(
+        record,
+        model_id=MODEL_IDS[0],
+        generate=lambda prompts, params: [
+            {
+                "text": "answer",
+                "token_ids": [21],
+                "outputs": [
+                    {"token_ids": [21], "logprobs": [-0.5], "finish_reason": "stop"}
+                ],
+            }
+        ],
+        output_path=output,
+        batch_size=1,
+        sampling_params=object(),
+        retry_errors=True,
+    )
+
+    saved = runner.read_jsonl(output)
+    assert saved[0]["finish_reason"] == "stop"
+    runner.evaluate_records_batched(
+        record,
+        model_id=MODEL_IDS[0],
+        generate=lambda prompts, params: (_ for _ in ()).throw(
+            AssertionError("completed row must resume without generation")
+        ),
+        output_path=output,
+        batch_size=1,
+        sampling_params=object(),
+    )
+    assert runner.read_jsonl(output)[0]["finish_reason"] == "stop"
+
+
 def test_vllm_nested_logprobs_select_token_id_and_validate_lengths() -> None:
     runner = entrypoint()
     raw_response = {
@@ -1484,6 +1564,39 @@ def test_scoring_manifest_hashes_in_bounded_chunks_and_preserves_ordered_ids(
     )
 
 
+def test_score_manifest_bindings_record_canonical_score_paths_and_digests(
+    tmp_path: Path,
+) -> None:
+    runner = entrypoint()
+    model_id = MODEL_IDS[0]
+    output_root = tmp_path / "results"
+    slug = runner.model_spec(model_id).slug
+    manifest_path = output_root / slug / "scoring_manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({"model_id": model_id}), encoding="utf-8")
+    score_paths: dict[str, Path] = {}
+    for benchmark in runner.DATASET_SCOPES:
+        score_path = no_steering.output_paths(benchmark, model_id, root=output_root)[
+            "scores"
+        ]
+        score_path.parent.mkdir(parents=True, exist_ok=True)
+        score_path.write_text(json.dumps({"id": benchmark}) + "\n", encoding="utf-8")
+        score_paths[benchmark] = score_path
+
+    runner._write_score_manifest_bindings(output_root=output_root, model_id=model_id)
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["score_files"] == {
+        benchmark: {
+            "path": str(score_paths[benchmark].resolve()),
+            "content_sha256": hashlib.sha256(
+                score_paths[benchmark].read_bytes()
+            ).hexdigest(),
+        }
+        for benchmark in runner.DATASET_SCOPES
+    }
+
+
 def test_score_phase_preflights_duplicate_response_ids_before_manifest_or_judge(
     tmp_path: Path,
 ) -> None:
@@ -1650,8 +1763,14 @@ def test_score_phase_complete_invalid_ppl_still_raises(tmp_path: Path) -> None:
         )
 
 
-def test_main_keeps_tee_and_disables_child_notifications(
+@pytest.mark.parametrize(
+    ("managed_finalizer", "expected_enabled"),
+    [(False, True), (True, False)],
+)
+def test_main_keeps_tee_and_owns_standalone_notification(
     monkeypatch: pytest.MonkeyPatch,
+    managed_finalizer: bool,
+    expected_enabled: bool,
 ) -> None:
     runner = entrypoint()
     calls: list[tuple[str, object]] = []
@@ -1675,10 +1794,54 @@ def test_main_keeps_tee_and_disables_child_notifications(
     monkeypatch.setattr(runner, "tee_stdout", fake_tee)
     monkeypatch.setattr(runner, "_run", lambda args: None)
 
-    runner.main(["--model-id", MODEL_IDS[0], "--phase", "preflight"])
+    argv = ["--model-id", MODEL_IDS[0], "--phase", "preflight"]
+    if managed_finalizer:
+        argv.append("--managed-finalizer")
+    runner.main(argv)
 
     assert [name for name, _ in calls] == ["notify", "tee"]
     assert calls[0][1] == {
         "log_file": runner.ROOT / "logs" / "no_steering.log",
-        "enabled": False,
+        "enabled": expected_enabled,
     }
+
+
+@pytest.mark.parametrize("managed_finalizer", [False, True])
+def test_main_preserves_failure_propagation_for_notification_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    managed_finalizer: bool,
+) -> None:
+    runner = entrypoint()
+    calls: list[tuple[str, object]] = []
+    notification_kwargs: dict[str, object] = {}
+
+    class FakeContext:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> bool:
+            calls.append(("exit", exc[0]))
+            return False
+
+    def fake_notify(*args: object, **kwargs: object) -> FakeContext:
+        notification_kwargs.update(kwargs)
+        calls.append(("notify", kwargs))
+        return FakeContext()
+
+    monkeypatch.setattr(runner, "notify_on_exit", fake_notify)
+    monkeypatch.setattr(runner, "tee_stdout", lambda *args, **kwargs: FakeContext())
+
+    def fail(_args: object) -> None:
+        raise RuntimeError("run failed")
+
+    monkeypatch.setattr(runner, "_run", fail)
+    argv = ["--model-id", MODEL_IDS[0], "--phase", "preflight"]
+    if managed_finalizer:
+        argv.append("--managed-finalizer")
+
+    with pytest.raises(RuntimeError, match="run failed"):
+        runner.main(argv)
+
+    assert calls[0][0] == "notify"
+    assert notification_kwargs["enabled"] is not managed_finalizer
+    assert calls[1] == ("exit", RuntimeError)

@@ -120,6 +120,7 @@ def test_smoke_uses_result_summary_and_checkpoint_manifest_responses(
                     "benchmark": benchmark,
                     "model_id": MODEL_ID,
                     "status": "ok",
+                    "finish_reason": "stop",
                     "generated_token_count": 2,
                     "selected_generated_token_logprobs": [-0.1, -0.2],
                     "metadata": {
@@ -134,7 +135,7 @@ def test_smoke_uses_result_summary_and_checkpoint_manifest_responses(
             encoding="utf-8",
         )
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_id": MODEL_ID,
         "model_slug": model_spec(MODEL_ID).slug,
         "model_revision": model_spec(MODEL_ID).revision,
@@ -148,6 +149,16 @@ def test_smoke_uses_result_summary_and_checkpoint_manifest_responses(
                 "limited": True,
             }
             for benchmark in benchmark_ids
+        },
+        "benchmark_content_sha256": {
+            benchmark: hashlib.sha256(
+                json.dumps(
+                    [{"id": identifiers[0], "content": {}}],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            for benchmark, identifiers in benchmark_ids.items()
         },
     }
     (checkpoint_root / "manifest.json").write_text(

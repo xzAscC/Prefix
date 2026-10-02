@@ -6,7 +6,7 @@ import json
 import importlib
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import pytest
 
@@ -316,3 +316,164 @@ def test_blocked_prompt_raises_judge_blocked() -> None:
     transport = FakeTransport([(200, blocked_payload)])
     with pytest.raises(JudgeBlocked, match="SAFETY"):
         _judge(transport).judge_safety("harmful request", "unsafe response")
+
+
+class FakeFallbackJudge:
+    def __init__(self, model: str, outcomes: dict[str, object]) -> None:
+        self.model = model
+        self.outcomes = outcomes
+        self.calls: list[tuple[str, str]] = []
+
+    def judge_safety(self, request: str, response: str) -> bool:
+        self.calls.append((request, response))
+        outcome = self.outcomes[self.model]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return bool(outcome)
+
+
+def _legacy_row(identifier: str = "pair-1") -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "status": "blocked",
+        "label": None,
+        "error": "original provider block",
+        "model": "gemini-3.7-flash",
+        "attempts": 3,
+        "prompt_hash": "original-prompt-hash",
+    }
+
+
+def _run_fallback_judge(
+    rows: list[dict[str, Any]],
+    outcomes: dict[str, object],
+    *,
+    completed_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    judges: dict[str, FakeFallbackJudge] = {}
+
+    def factory(model: str) -> FakeFallbackJudge:
+        judges[model] = FakeFallbackJudge(model, outcomes)
+        return judges[model]
+
+    return cast(
+        list[dict[str, Any]],
+        judge_module.judge_with_fallback(
+            rows,
+            primary_model="gemini-3.7-flash",
+            fallback_model="gemini-3.5-flash-lite",
+            judge_factory=factory,
+            completed_ids=completed_ids,
+        ),
+    )
+
+
+def test_primary_success_does_not_call_fallback_and_records_provenance() -> None:
+    rows = [_legacy_row()]
+    original = dict(rows[0])
+
+    result = _run_fallback_judge(
+        rows,
+        {
+            "gemini-3.7-flash": True,
+            "gemini-3.5-flash-lite": RuntimeError("fallback must not be called"),
+        },
+    )[0]
+
+    assert rows[0] == original
+    for key, value in original.items():
+        assert result[key] == value
+    assert result["final_source"] == "primary"
+    assert result["disagreement"] is None
+    assert result["primary"] == {
+        "status": "ok",
+        "label": "SAFE",
+        "error": None,
+        "model": "gemini-3.7-flash",
+        "attempts": 1,
+        "prompt_hash": result["primary"]["prompt_hash"],
+    }
+    assert result["fallback"] is None
+
+
+@pytest.mark.parametrize(
+    ("primary_error", "primary_status"),
+    [
+        (JudgeBlocked("prompt blocked by provider: SAFETY"), "blocked"),
+        (JudgeRetryableError("Gemini request failed after 3 attempts"), "error"),
+        (
+            JudgeParseError("Gemini safety judge returned an unparseable label"),
+            "unparseable",
+        ),
+    ],
+    ids=["provider-block", "transport-exhausted", "unparseable"],
+)
+def test_primary_failure_uses_legacy_fallback_without_overwriting_original(
+    primary_error: BaseException,
+    primary_status: str,
+) -> None:
+    rows = [_legacy_row()]
+    original = dict(rows[0])
+
+    result = _run_fallback_judge(
+        rows,
+        {
+            "gemini-3.7-flash": primary_error,
+            "gemini-3.5-flash-lite": False,
+        },
+    )[0]
+
+    assert rows[0] == original
+    for key, value in original.items():
+        assert result[key] == value
+    assert result["final_source"] == "fallback"
+    assert result["disagreement"] is None
+    assert result["primary"]["status"] == primary_status
+    assert result["primary"]["label"] is None
+    assert result["primary"]["error"] == str(primary_error)
+    assert result["primary"]["model"] == "gemini-3.7-flash"
+    assert result["primary"]["attempts"] >= 1
+    assert isinstance(result["primary"]["prompt_hash"], str)
+    assert result["fallback"]["status"] == "ok"
+    assert result["fallback"]["label"] == "UNSAFE"
+    assert result["fallback"]["error"] is None
+    assert result["fallback"]["model"] == "gemini-3.5-flash-lite"
+    assert result["fallback"]["attempts"] == 1
+    assert isinstance(result["fallback"]["prompt_hash"], str)
+
+
+def test_both_models_fail_remains_unresolved_and_keeps_both_errors() -> None:
+    rows = [_legacy_row()]
+
+    result = _run_fallback_judge(
+        rows,
+        {
+            "gemini-3.7-flash": JudgeBlocked("primary blocked"),
+            "gemini-3.5-flash-lite": JudgeParseError("fallback unparseable"),
+        },
+    )[0]
+
+    assert result["final_source"] == "unresolved"
+    assert result["disagreement"] is None
+    for key, value in _legacy_row().items():
+        assert result[key] == value
+    assert result["primary"]["status"] == "blocked"
+    assert result["primary"]["error"] == "primary blocked"
+    assert result["fallback"]["status"] == "unparseable"
+    assert result["fallback"]["error"] == "fallback unparseable"
+    assert result["label"] is None
+
+
+def test_completed_ids_are_idempotent_and_do_not_invoke_any_provider() -> None:
+    rows = [_legacy_row("already-done")]
+
+    result = _run_fallback_judge(
+        rows,
+        {
+            "gemini-3.7-flash": RuntimeError("network must not be called"),
+            "gemini-3.5-flash-lite": RuntimeError("network must not be called"),
+        },
+        completed_ids={"already-done"},
+    )
+
+    assert result == rows

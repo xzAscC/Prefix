@@ -218,11 +218,79 @@ def test_capture_records_request_ids_and_scalar_dots(monkeypatch):
         ("prefill", "p"),
         ("decode", "d"),
     ]
+    assert sink.rows[0]["k"] is None
+    assert sink.rows[0]["slot"] == 0
+    assert sink.rows[1]["phase"] == "decode"
+    assert sink.rows[1]["slot"] == 1
     assert sink.rows[0]["dots"] == [3.0]
     assert sink.rows[1]["k"] == 3
     assert sink.rows[1]["norm"] == pytest.approx(
         torch.linalg.vector_norm(torch.tensor([5.0, 6.0])).item()
     )
+
+
+def test_scalar_capture_preserves_layer_and_all_direction_values_with_tuple_output(
+    monkeypatch,
+):
+    value = metadata([2, 1], [2, 4])
+    monkeypatch.setattr("prefix.vllm_steering._current_attn_metadata", lambda: value)
+    sink = CaptureSink()
+    layer = SimpleNamespace(
+        forward=lambda hidden: (hidden.clone(), torch.zeros_like(hidden))
+    )
+    vllm_steering._LATEST_INPUT_BATCH[id(layer)] = FakeInputBatch(("p", "d"), (2, 1))
+    detach = attach_capture(
+        layer,
+        19,
+        sink,
+        decode_index_resolver=lambda _: [3],
+        scalar_directions=[torch.tensor([1.0, 0.0]), torch.tensor([0.0, 1.0])],
+    )
+
+    out0, residual = layer.forward(torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]))
+    detach()
+
+    assert torch.equal(out0[1], torch.tensor([3.0, 4.0]))
+    assert torch.equal(residual[1], torch.zeros(2))
+    assert sink.rows[0]["layer"] == 19
+    assert sink.rows[1]["layer"] == 19
+    assert sink.rows[0]["dots"] == [3.0, 4.0]
+    assert sink.rows[1]["dots"] == [5.0, 6.0]
+    assert sink.rows[1]["k"] == 3
+
+
+def test_layer_nineteen_and_twenty_are_distinct_zero_based_capture_targets(monkeypatch):
+    value = metadata([2], [2])
+    monkeypatch.setattr("prefix.vllm_steering._current_attn_metadata", lambda: value)
+    layers = [FakeLayer() for _ in range(21)]
+    model = SimpleNamespace(model=SimpleNamespace(layers=layers))
+    runner = SimpleNamespace(model=model)
+    runner.prepare_inputs = lambda scheduler_output=None: None
+    worker = SimpleNamespace(model_runner=runner)
+    llm = SimpleNamespace(
+        llm_engine=SimpleNamespace(
+            engine_core=SimpleNamespace(
+                engine_core=SimpleNamespace(
+                    model_executor=SimpleNamespace(
+                        driver_worker=SimpleNamespace(worker=worker)
+                    )
+                )
+            )
+        )
+    )
+    first, second = layers[19], layers[20]
+    first_sink, second_sink = CaptureSink(), CaptureSink()
+    vllm_steering._LATEST_INPUT_BATCH[id(llm)] = FakeInputBatch(("p",), (2,))
+
+    first_detach = attach_capture(llm, 19, first_sink)
+    second_detach = attach_capture(llm, 20, second_sink)
+    first.forward(torch.ones(2, 2))
+    second.forward(torch.ones(2, 2))
+    first_detach()
+    second_detach()
+
+    assert first_sink.rows[0]["layer"] == 19
+    assert second_sink.rows[0]["layer"] == 20
 
 
 def test_capture_can_attach_to_two_layers(monkeypatch):

@@ -3,12 +3,15 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
+import subprocess
 import threading
 from pathlib import Path
 
 import pytest
 
 from prefix.judge import MATH_PROMPT, SAFETY_PROMPT
+from prefix import notify
 
 
 ROOT = Path(__file__).parents[1]
@@ -76,7 +79,7 @@ def test_finalizer_claims_once_and_sends_one_completion_email(
     assert "finalization" in capsys.readouterr().out
 
 
-def test_incomplete_artifacts_fail_before_claim_or_email(
+def test_incomplete_artifacts_finalize_failed_notification_before_reraising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _module()
@@ -85,13 +88,11 @@ def test_incomplete_artifacts_fail_before_claim_or_email(
         "validate_generation",
         lambda root: (_ for _ in ()).throw(ValueError("incomplete generation")),
     )
-    calls: list[object] = []
+    calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        module,
-        "send_batch_notification",
-        lambda task, event, *, details=None: (
-            calls.append((task, event, details)) or True
-        ),
+        notify,
+        "send_email",
+        lambda subject, body, *, to=None: calls.append((subject, body)) or True,
     )
     state = tmp_path / "state.json"
 
@@ -102,8 +103,101 @@ def test_incomplete_artifacts_fail_before_claim_or_email(
             state_path=state,
         )
 
-    assert calls == []
-    assert not state.exists()
+    assert calls == [("[Prefix] FAILED: no-steering default", calls[0][1])]
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "failed"
+    assert saved["delivery_status"] == "sent"
+    assert "incomplete generation" in saved["details"]
+
+
+def test_validation_failure_uses_native_notification_sender_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    validation_error = ValueError("incomplete generation")
+    monkeypatch.setattr(
+        module,
+        "validate_generation",
+        lambda root: (_ for _ in ()).throw(validation_error),
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_send_email(subject: str, body: str, *, to=None) -> bool:
+        calls.append((subject, body))
+        return True
+
+    monkeypatch.setattr(notify, "send_email", fake_send_email)
+    state = tmp_path / "state.json"
+
+    with pytest.raises(ValueError) as error:
+        module.finalize(
+            generation_root=tmp_path / "generation",
+            scoring_root=tmp_path / "scores",
+            state_path=state,
+        )
+
+    assert error.value is validation_error
+    assert len(calls) == 1
+    assert calls[0][0] == "[Prefix] FAILED: no-steering default"
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "failed"
+    assert saved["delivery_status"] == "sent"
+
+
+@pytest.mark.parametrize("symlink_parent", [False, True])
+def test_validate_scoring_rejects_symlinked_score_component(
+    tmp_path: Path, symlink_parent: bool
+) -> None:
+    module, _generation_a, generation_b, scoring, manifest_path = (
+        _bound_scoring_fixture(tmp_path)
+    )
+    slug = module.model_spec("Qwen/Qwen3-4B").slug
+    score = scoring / slug / "mmlu_pro" / "scores.jsonl"
+    target = tmp_path / "outside-scores.jsonl"
+    target.write_bytes(score.read_bytes())
+    if symlink_parent:
+        parent = score.parent
+        real_parent = tmp_path / "real-mmlu-pro"
+        parent.rename(real_parent)
+        parent.symlink_to(real_parent, target_is_directory=True)
+    else:
+        score.unlink()
+        score.symlink_to(target)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["score_files"]["mmlu_pro"] = {
+        "path": str(score.resolve()),
+        "content_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="symlink"):
+        module.validate_scoring(scoring, generation_checkpoint_root=generation_b)
+
+
+def test_failed_notification_error_does_not_mask_validation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    validation_error = ValueError("incomplete generation")
+    monkeypatch.setattr(
+        module,
+        "validate_generation",
+        lambda root: (_ for _ in ()).throw(validation_error),
+    )
+
+    def fail_finalization(*args: object, **kwargs: object) -> str:
+        raise OSError("state disk full")
+
+    monkeypatch.setattr(module, "finalize_terminal_notification", fail_finalization)
+
+    with pytest.raises(ValueError) as error:
+        module.finalize(
+            generation_root=tmp_path / "generation",
+            scoring_root=tmp_path / "scores",
+            state_path=tmp_path / "state.json",
+        )
+
+    assert error.value is validation_error
 
 
 def test_preexisting_claimed_state_suppresses_ambiguous_retry(
@@ -111,7 +205,7 @@ def test_preexisting_claimed_state_suppresses_ambiguous_retry(
 ) -> None:
     module = _module()
     _patch_validators(monkeypatch, module)
-    calls: list[object] = []
+    calls: list[tuple[str, str, str | None]] = []
     monkeypatch.setattr(
         module,
         "send_batch_notification",
@@ -177,6 +271,65 @@ def test_notification_failure_is_nonfatal_and_claim_remains_durable(
         == "sent"
     )
     assert calls == 2
+
+
+def test_finalizer_preserves_completed_workflow_when_delivery_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    _patch_validators(monkeypatch, module)
+    state = tmp_path / "state.json"
+    calls = 0
+
+    def flaky(*args: object, **kwargs: object) -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    monkeypatch.setattr(module, "send_batch_notification", flaky)
+    kwargs = {
+        "generation_root": tmp_path / "generation",
+        "scoring_root": tmp_path / "scores",
+        "state_path": state,
+    }
+
+    assert module.finalize(**kwargs) == "failed"
+    first = json.loads(state.read_text(encoding="utf-8"))
+    assert first["workflow_status"] == "completed"
+    assert first["delivery_status"] == "failed"
+
+    assert module.finalize(**kwargs) == "sent"
+    second = json.loads(state.read_text(encoding="utf-8"))
+    assert second["workflow_status"] == "completed"
+    assert second["delivery_status"] == "sent"
+
+
+def test_finalizer_does_not_retry_ambiguous_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    _patch_validators(monkeypatch, module)
+    state = tmp_path / "state.json"
+    calls = 0
+
+    def ambiguous(*args: object, **kwargs: object) -> bool:
+        nonlocal calls
+        calls += 1
+        raise module.AmbiguousDeliveryError("SMTP acceptance is unknown")
+
+    monkeypatch.setattr(module, "send_batch_notification", ambiguous)
+    kwargs = {
+        "generation_root": tmp_path / "generation",
+        "scoring_root": tmp_path / "scores",
+        "state_path": state,
+    }
+
+    assert module.finalize(**kwargs) == "claimed"
+    assert module.finalize(**kwargs) == "claimed"
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "completed"
+    assert saved["delivery_status"] == "claimed"
+    assert calls == 1
 
 
 def test_notifier_false_result_does_not_mark_delivery_sent(
@@ -326,6 +479,33 @@ def test_main_exits_nonzero_when_finalize_fails(
     assert error.value.code != 0
 
 
+def test_main_rejects_symlinked_log_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    target = tmp_path / "target.log"
+    target.write_text("keep", encoding="utf-8")
+    link = tmp_path / "finalizer.log"
+    link.symlink_to(target)
+    monkeypatch.setattr(module, "finalize", lambda **kwargs: "sent")
+
+    with pytest.raises(ValueError, match="symlink"):
+        module.main(
+            [
+                "--generation-root",
+                str(tmp_path / "generation"),
+                "--scoring-root",
+                str(tmp_path / "scores"),
+                "--state-path",
+                str(tmp_path / "state.json"),
+                "--log-path",
+                str(link),
+            ]
+        )
+
+    assert target.read_text(encoding="utf-8") == "keep"
+
+
 def test_state_writes_fsync_file_and_parent_and_reject_symlinked_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -401,6 +581,12 @@ def _bound_scoring_fixture(tmp_path: Path):
         + "\n",
         encoding="utf-8",
     )
+    score_files = {
+        "mmlu_pro": {
+            "path": str(score.resolve()),
+            "content_sha256": hashlib.sha256(score.read_bytes()).hexdigest(),
+        }
+    }
     manifest = {
         "schema_version": 1,
         "model_id": model_id,
@@ -421,6 +607,7 @@ def _bound_scoring_fixture(tmp_path: Path):
                 "content_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
             }
         },
+        "score_files": score_files,
     }
     manifest_path = scoring / slug / "scoring_manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -529,6 +716,26 @@ def test_validate_scoring_rejects_changed_bound_response_path(
         module.validate_scoring(scoring, generation_checkpoint_root=generation_b)
 
 
+def test_validate_scoring_rejects_changed_bound_score_content(
+    tmp_path: Path,
+) -> None:
+    module, _generation_a, generation_b, scoring, _manifest = _bound_scoring_fixture(
+        tmp_path
+    )
+    score = (
+        scoring / module.model_spec("Qwen/Qwen3-4B").slug / "mmlu_pro" / "scores.jsonl"
+    )
+    score.write_text(
+        json.dumps(
+            {"id": "m0", "benchmark": "mmlu_pro", "status": "ok", "correct": False}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="score content digest"):
+        module.validate_scoring(scoring, generation_checkpoint_root=generation_b)
+
+
 def test_validate_scoring_rejects_unexpected_error_status(
     tmp_path: Path,
 ) -> None:
@@ -577,11 +784,11 @@ def test_finalize_rejects_non_ok_scoring_status_before_claim_or_notification(
         "validate_generation",
         lambda root: {"models": 1, "records": 1},
     )
-    calls: list[object] = []
+    calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        module,
-        "send_batch_notification",
-        lambda *args, **kwargs: calls.append((args, kwargs)) or True,
+        notify,
+        "send_email",
+        lambda subject, body, *, to=None: calls.append((subject, body)) or True,
     )
     score = (
         scoring / module.model_spec("Qwen/Qwen3-4B").slug / "mmlu_pro" / "scores.jsonl"
@@ -599,8 +806,9 @@ def test_finalize_rejects_non_ok_scoring_status_before_claim_or_notification(
             state_path=state,
         )
 
-    assert calls == []
-    assert not state.exists()
+    assert len(calls) == 1
+    assert calls[0][0] == "[Prefix] FAILED: no-steering default"
+    assert json.loads(state.read_text(encoding="utf-8"))["workflow_status"] == "failed"
 
 
 @pytest.mark.parametrize(
@@ -634,3 +842,48 @@ def test_local_scoring_script_finalizes_only_after_all_models_succeed() -> None:
     assert script.index("finalize_no_steering.py") > script.index("done")
     assert "--generation-root" in script
     assert "--scoring-root" in script
+
+
+def test_local_scoring_manages_children_and_leaves_finalizer_unmanaged() -> None:
+    script = (ROOT / "scripts" / "score_no_steering_local.sh").read_text(
+        encoding="utf-8"
+    )
+    child = script.split(
+        '"$UV_BIN" run --offline --frozen --no-sync python "$SCRIPT_DIR/run_no_steering.py"',
+        1,
+    )[1]
+    finalizer = script.split(
+        '"$UV_BIN" run --offline --frozen --no-sync python "$SCRIPT_DIR/finalize_no_steering.py"',
+        1,
+    )[1]
+    assert child.split("done", 1)[0].count("--managed-finalizer") == 1
+    assert "--managed-finalizer" not in finalizer
+
+
+def test_local_scoring_requires_absolute_executable_uv_bin_before_uv_call(
+    tmp_path: Path,
+) -> None:
+    script = ROOT / "scripts" / "score_no_steering_local.sh"
+    uv_log = tmp_path / "uv-called"
+    path_uv = tmp_path / "uv"
+    path_uv.write_text(
+        f"#!/usr/bin/env bash\nprintf called > '{uv_log}'\nexit 0\n",
+        encoding="utf-8",
+    )
+    path_uv.chmod(0o755)
+    response_root = tmp_path / "responses" / "checkpoints"
+    response_root.mkdir(parents=True)
+    output_root = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", str(script), str(response_root), str(output_root)],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:/usr/bin:/bin",
+            "UV_BIN": "uv",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert not uv_log.exists()

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import time
 
+import prefix.metrics as metrics
 from prefix.metrics import (
     BinResult,
     binned_success_rate,
@@ -91,3 +93,261 @@ def test_select_operating_point_applies_cap_and_tie_breaks_second() -> None:
 def test_select_operating_point_raises_when_cap_is_unmet() -> None:
     with pytest.raises(ValueError, match="cap"):
         select_operating_point([(1.0, 0.5)], baseline_second=1.0)
+
+
+def test_token_cosine_trajectory_rejects_zero_norm_and_nonfinite_values() -> None:
+    direction = np.array([1.0, 0.0])
+    with pytest.raises(ValueError, match="zero norm"):
+        getattr(metrics, "token_cosine_trajectory")(
+            np.array([[1.0, 0.0], [0.0, 0.0]]), direction
+        )
+    with pytest.raises(ValueError, match="finite"):
+        getattr(metrics, "token_cosine_trajectory")(
+            np.array([[np.nan, 0.0]]), direction
+        )
+
+
+def test_token_cosine_trajectory_aggregation_is_category_macro_and_one_based() -> None:
+    records = [
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "a1",
+            "category": "A",
+            "cosines": [1.0, 0.5],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "a2",
+            "category": "A",
+            "cosines": [1.0],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "b1",
+            "category": "B",
+            "cosines": [0.0, 0.25, 0.5],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "b2",
+            "category": "B",
+            "cosines": [0.0],
+        },
+        {
+            "condition": "control",
+            "layer": 20,
+            "prompt_id": "a1",
+            "category": "A",
+            "cosines": [0.2],
+        },
+    ]
+
+    result = getattr(metrics, "aggregate_token_cosine_trajectories")(records)
+
+    layer_19 = [
+        row for row in result if row["condition"] == "control" and row["layer"] == 19
+    ]
+    assert [row["token_index"] for row in layer_19] == [1, 2, 3]
+    np.testing.assert_allclose(
+        [row["mean_cosine"] for row in layer_19], [0.5, 0.375, 0.5]
+    )
+    assert [row["support"] for row in layer_19] == [4, 2, 1]
+    assert layer_19[1]["category_support"] == {"A": 1, "B": 1}
+    assert layer_19[2]["category_support"] == {"B": 1}
+
+    layer_20 = [
+        row for row in result if row["condition"] == "control" and row["layer"] == 20
+    ]
+    assert [(row["layer"], row["token_index"]) for row in layer_20] == [(20, 1)]
+    assert layer_20[0]["mean_cosine"] == pytest.approx(0.2)
+
+
+def test_paired_bootstrap_resamples_prompts_shared_between_conditions() -> None:
+    records = [
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "a1",
+            "category": "A",
+            "cosines": [0.0],
+        },
+        {
+            "condition": "steered",
+            "layer": 19,
+            "prompt_id": "a1",
+            "category": "A",
+            "cosines": [1.0],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "a2",
+            "category": "A",
+            "cosines": [10.0],
+        },
+        {
+            "condition": "steered",
+            "layer": 19,
+            "prompt_id": "a2",
+            "category": "A",
+            "cosines": [11.0],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "b1",
+            "category": "B",
+            "cosines": [20.0],
+        },
+        {
+            "condition": "steered",
+            "layer": 19,
+            "prompt_id": "b1",
+            "category": "B",
+            "cosines": [23.0],
+        },
+        {
+            "condition": "control",
+            "layer": 19,
+            "prompt_id": "b2",
+            "category": "B",
+            "cosines": [30.0],
+        },
+        {
+            "condition": "steered",
+            "layer": 19,
+            "prompt_id": "b2",
+            "category": "B",
+            "cosines": [33.0],
+        },
+    ]
+
+    first = getattr(metrics, "paired_bootstrap_ci")(
+        records,
+        control="control",
+        treatment="steered",
+        n_bootstrap=31,
+        seed=17,
+    )
+    second = getattr(metrics, "paired_bootstrap_ci")(
+        records,
+        control="control",
+        treatment="steered",
+        n_bootstrap=31,
+        seed=17,
+    )
+
+    assert first == second
+    assert first[0]["layer"] == 19
+    assert first[0]["token_index"] == 1
+    assert first[0]["mean_difference"] == pytest.approx(2.0)
+    assert first[0]["lower"] == pytest.approx(2.0)
+    assert first[0]["upper"] == pytest.approx(2.0)
+
+
+def test_paired_bootstrap_pairs_only_same_physical_layer_and_is_finite_reproducible() -> (
+    None
+):
+    records = []
+    for layer, difference in ((19, 1.0), (20, 3.0)):
+        for category in ("A", "B"):
+            for prompt_index in range(8):
+                control = float(layer + prompt_index)
+                records.extend(
+                    [
+                        {
+                            "condition": "baseline",
+                            "layer": layer,
+                            "prompt_id": f"{category}-{prompt_index}",
+                            "category": category,
+                            "cosines": [control],
+                        },
+                        {
+                            "condition": f"layer_{layer}",
+                            "layer": layer,
+                            "prompt_id": f"{category}-{prompt_index}",
+                            "category": category,
+                            "cosines": [control + difference],
+                        },
+                    ]
+                )
+
+    first = metrics.paired_bootstrap_ci(
+        records,
+        control="baseline",
+        treatment="layer_19",
+        n_bootstrap=10000,
+        seed=42,
+        confidence=0.95,
+    )
+    second = metrics.paired_bootstrap_ci(
+        records,
+        control="baseline",
+        treatment="layer_19",
+        n_bootstrap=10000,
+        seed=42,
+        confidence=0.95,
+    )
+
+    assert [(row["layer"], row["token_index"]) for row in first] == [(19, 1)]
+    assert [row["mean_difference"] for row in first] == pytest.approx([1.0])
+    assert first == second
+    assert all(
+        np.isfinite([row["mean_difference"], row["lower"], row["upper"]]).all()
+        for row in first
+    )
+    layer_20 = metrics.paired_bootstrap_ci(
+        records,
+        control="baseline",
+        treatment="layer_20",
+        n_bootstrap=10000,
+        seed=42,
+        confidence=0.95,
+    )
+    assert [(row["layer"], row["mean_difference"]) for row in layer_20] == [
+        (20, pytest.approx(3.0))
+    ]
+
+
+def test_paired_bootstrap_10000_resamples_has_practical_cpu_runtime() -> None:
+    records = []
+    for layer in range(1, 12):
+        for category in ("A", "B", "C", "D", "E", "F", "G"):
+            for prompt_index in range(64):
+                prompt_id = f"{category}-{prompt_index}"
+                records.extend(
+                    [
+                        {
+                            "condition": "baseline",
+                            "layer": layer,
+                            "prompt_id": prompt_id,
+                            "category": category,
+                            "cosines": [0.1, 0.2],
+                        },
+                        {
+                            "condition": "steered",
+                            "layer": layer,
+                            "prompt_id": prompt_id,
+                            "category": category,
+                            "cosines": [0.2, 0.4],
+                        },
+                    ]
+                )
+
+    started = time.perf_counter()
+    result = metrics.paired_bootstrap_ci(
+        records,
+        control="baseline",
+        treatment="steered",
+        n_bootstrap=10000,
+        seed=42,
+        confidence=0.95,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert len(result) == 22
+    assert elapsed < 4.0

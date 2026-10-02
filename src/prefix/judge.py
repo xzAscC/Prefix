@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 import re
@@ -83,6 +84,110 @@ def judge_batch(
         raise ValueError("max_workers must be at least 1")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         return list(executor.map(judge, items))
+
+
+def judge_with_fallback(
+    rows: Iterable[dict[str, Any]],
+    *,
+    primary_model: str = "gemini-3.7-flash",
+    fallback_model: str = "gemini-3.5-flash-lite",
+    judge_factory: Callable[[str], Any],
+    completed_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    completed = completed_ids or set()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        identifier = str(row["id"])
+        if identifier in completed:
+            results.append(dict(row))
+            continue
+
+        request = str(row.get("request", row.get("behavior", "")))
+        response = str(row.get("response", ""))
+        prompt_hash = hashlib.sha256(
+            SAFETY_PROMPT.format(request=request, response=response).encode("utf-8")
+        ).hexdigest()
+
+        primary = _run_fallback_attempt(
+            judge_factory(primary_model),
+            primary_model,
+            request,
+            response,
+            prompt_hash,
+        )
+        fallback: dict[str, Any] | None = None
+        if primary["status"] != "ok":
+            fallback = _run_fallback_attempt(
+                judge_factory(fallback_model),
+                fallback_model,
+                request,
+                response,
+                prompt_hash,
+            )
+
+        result = dict(row)
+        result.update(
+            {
+                "primary": primary,
+                "fallback": fallback,
+                "final_source": (
+                    "primary"
+                    if primary["status"] == "ok"
+                    else "fallback"
+                    if fallback is not None and fallback["status"] == "ok"
+                    else "unresolved"
+                ),
+                "disagreement": None,
+            }
+        )
+        results.append(result)
+    return results
+
+
+def _run_fallback_attempt(
+    judge: Any,
+    model: str,
+    request: str,
+    response: str,
+    prompt_hash: str,
+) -> dict[str, Any]:
+    try:
+        safe = bool(judge.judge_safety(request, response))
+    except JudgeBlocked as error:
+        return {
+            "status": "blocked",
+            "label": None,
+            "error": str(error),
+            "model": model,
+            "attempts": 1,
+            "prompt_hash": prompt_hash,
+        }
+    except JudgeParseError as error:
+        return {
+            "status": "unparseable",
+            "label": None,
+            "error": str(error),
+            "model": model,
+            "attempts": 1,
+            "prompt_hash": prompt_hash,
+        }
+    except (JudgeRetryableError, RuntimeError) as error:
+        return {
+            "status": "error",
+            "label": None,
+            "error": str(error),
+            "model": model,
+            "attempts": 1,
+            "prompt_hash": prompt_hash,
+        }
+    return {
+        "status": "ok",
+        "label": "SAFE" if safe else "UNSAFE",
+        "error": None,
+        "model": model,
+        "attempts": 1,
+        "prompt_hash": prompt_hash,
+    }
 
 
 class GeminiJudge:

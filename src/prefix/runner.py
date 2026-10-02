@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import stat
 import sys
 import tempfile
 from contextlib import contextmanager
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from .vllm_steering import (
 _engine_singleton: Any | None = None
 _engine_config: tuple[str, tuple[tuple[str, Any], ...]] | None = None
 _ANSWER_RE = re.compile(r"answer\s+is\s*\(?([A-J])\)?\b", re.IGNORECASE)
+_BOXED_ANSWER_RE = re.compile(r"\\boxed\s*\{\s*([A-J])\s*\}", re.IGNORECASE)
 JSONL_TAIL_BYTES = 64 * 1024
 
 
@@ -231,6 +233,44 @@ def _reject_symlink_components(path: Path) -> None:
             )
 
 
+class MutationLockError(RuntimeError):
+    """Raised when an experiment root is already being mutated."""
+
+
+@contextmanager
+def exclusive_mutation_lock(root: str | Path) -> Iterator[Path]:
+    """Exclusively lock an experiment root for the duration of a mutation."""
+    root_path = Path(root)
+    _reject_symlink_components(root_path)
+    root_path.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_components(root_path)
+    if not root_path.is_dir():
+        raise NotADirectoryError(f"experiment root is not a directory: {root_path}")
+
+    lock_path = root_path / ".mutation.lock"
+    _reject_symlink_components(lock_path)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise MutationLockError(
+                f"experiment root already locked for mutation: {root_path}"
+            ) from error
+        acquired = True
+        yield root_path
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        else:
+            os.close(descriptor)
+
+
 def _fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     descriptor = os.open(path, flags)
@@ -334,9 +374,9 @@ def mmlu_prompt(question: str, options: list[str]) -> str:
 
 
 def parse_answer_letter(text: str) -> str | None:
-    matches = list(_ANSWER_RE.finditer(text))
-    if matches:
-        return matches[-1].group(1).upper()
+    candidates = [*(_ANSWER_RE.finditer(text)), *(_BOXED_ANSWER_RE.finditer(text))]
+    if candidates:
+        return max(candidates, key=lambda match: match.start()).group(1).upper()
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if lines:
         match = re.fullmatch(r"\(?([A-J])\)?", lines[-1], re.IGNORECASE)
@@ -367,10 +407,10 @@ def get_engine(model_id: str, **llm_kwargs):
     return _engine_singleton
 
 
-def _sampling_params(*, max_tokens: int, temperature: float):
+def _sampling_params(*, max_tokens: int, temperature: float, top_p: float = 1.0):
     from vllm import SamplingParams  # type: ignore[import-not-found]
 
-    return SamplingParams(max_tokens=max_tokens, temperature=temperature)
+    return SamplingParams(max_tokens=max_tokens, temperature=temperature, top_p=top_p)
 
 
 @dataclass(frozen=True)
@@ -404,7 +444,9 @@ def capture_prompt_hiddens(
         rows = {
             str(row["request_id"]): row["hidden"]
             for row in sink.rows
-            if row.get("phase") == "prefill" and "hidden" in row
+            if row.get("phase") == "prefill"
+            and row.get("k") is None
+            and "hidden" in row
         }
         missing = [request_id for request_id in request_ids if request_id not in rows]
         if missing:
@@ -483,8 +525,12 @@ def steered_generate(
     spec: SteeringSpec | None,
     batch_prompts: int = 256,
     sink: CaptureSink | None = None,
-    scalar_directions: list[torch.Tensor] | None = None,
+    scalar_directions: (
+        list[torch.Tensor] | Mapping[int, list[torch.Tensor]] | None
+    ) = None,
     capture_layer: int | None = None,
+    capture_layers: (Iterable[int] | Mapping[int, list[torch.Tensor]] | None) = None,
+    top_p: float = 1.0,
 ) -> list[GenerateResult]:
     if batch_prompts < 1:
         raise ValueError("batch_prompts must be at least 1")
@@ -509,23 +555,41 @@ def steered_generate(
                 )
             )
         if sink is not None:
-            if capture_layer is None and spec is None:
-                raise ValueError("capture requires capture_layer or a steering spec")
-            if capture_layer is None:
-                assert spec is not None
-                capture_target_layer = spec.layer
-            else:
-                capture_target_layer = capture_layer
-            detachers.append(
-                attach_capture(
-                    llm,
-                    layer=capture_target_layer,
-                    sink=sink,
-                    decode_index_resolver=resolver,
-                    scalar_directions=scalar_directions,
+            if capture_layers is not None and capture_layer is not None:
+                raise ValueError(
+                    "capture_layer and capture_layers are mutually exclusive"
                 )
-            )
-        params = _sampling_params(max_tokens=max_tokens, temperature=0.0)
+            if capture_layers is None and capture_layer is None and spec is None:
+                raise ValueError("capture requires capture_layer or a steering spec")
+            if capture_layers is None:
+                capture_targets = [
+                    spec.layer
+                    if capture_layer is None and spec is not None
+                    else capture_layer
+                ]
+            else:
+                capture_targets = list(capture_layers)
+                if not capture_targets:
+                    raise ValueError("capture_layers must not be empty")
+            for capture_target_layer in capture_targets:
+                if capture_target_layer is None:
+                    raise ValueError("capture layer must be an integer")
+                if isinstance(capture_layers, Mapping):
+                    directions = capture_layers[capture_target_layer]
+                elif isinstance(scalar_directions, Mapping):
+                    directions = scalar_directions[capture_target_layer]
+                else:
+                    directions = scalar_directions
+                detachers.append(
+                    attach_capture(
+                        llm,
+                        layer=capture_target_layer,
+                        sink=sink,
+                        decode_index_resolver=resolver,
+                        scalar_directions=directions,
+                    )
+                )
+        params = _sampling_params(max_tokens=max_tokens, temperature=0.0, top_p=top_p)
         results: list[GenerateResult] = []
         for start in range(0, len(prompts), batch_prompts):
             outputs = llm.generate(prompts[start : start + batch_prompts], params)
@@ -557,6 +621,7 @@ __all__ = [
     "load_directions",
     "missing_ids",
     "mmlu_prompt",
+    "MutationLockError",
     "parse_answer_letter",
     "prepare_checkpoint_manifest",
     "read_json",
@@ -565,6 +630,7 @@ __all__ = [
     "steered_generate",
     "tee_stdout",
     "condition_id",
+    "exclusive_mutation_lock",
     "require_complete",
     "verify_manifest",
     "write_manifest",

@@ -1,0 +1,75 @@
+model:
+  id: Qwen/Qwen3-4B
+  revision: 1cfa9a7208912126459214e8b04321603b3df60c
+  checkpoint_namespace: exp1_v2
+  gpu_memory_utilization: 0.8
+  max_model_len: 8192
+
+direction:
+  semantics: unsafe
+  operation: harmful_minus_benign
+  pos_dataset: LLM-LAT/benign-dataset
+  neg_dataset: LLM-LAT/harmful-dataset
+  fit_per_class: 100
+  holdout_per_class: 50
+  position: last_prompt_token
+  method: dim
+
+grid:
+  layers: [1, 5, 8, 12, 16, 19, 20, 23, 27, 30, 34]
+  alpha: 0.03
+  schedule: full
+
+conditions:
+  - baseline
+  - layer_1
+  - layer_5
+  - layer_8
+  - layer_12
+  - layer_16
+  - layer_19
+  - layer_20
+  - layer_23
+  - layer_27
+  - layer_30
+  - layer_34
+
+steering:
+  mode: additive
+  replace_hidden_state: false
+
+generation:
+  dataset: harmbench
+  n_prompts: 154
+  max_new_tokens: 512
+  decoding: greedy
+  temperature: 0.0
+  top_p: 1.0
+  enable_thinking: false
+
+tuning: false
+replacement: false
+notifications: false
+
+judges:
+  primary:
+    model: gemini-3.7-flash
+    region: global
+    temperature: 0.0
+  fallback:
+    model: gemini-3.5-flash-lite
+    region: global
+    temperature: 0.0
+
+bootstrap:
+  enabled: true
+  n_resamples: 10000
+  confidence: 0.95
+  seed: 42
+
+artifacts:
+  namespace: exp1_v2
+  checkpoint_root: checkpoints/exp1_v2
+  result_root: results/exp1_v2
+
+seed: 42

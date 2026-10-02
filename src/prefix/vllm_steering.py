@@ -286,6 +286,7 @@ def attach_capture(
                 sink.rows.append(
                     {
                         "phase": "prefill" if position < len(prefill) else "decode",
+                        "layer": layer,
                         "row": row,
                         "k": None
                         if position < len(prefill)
@@ -316,6 +317,7 @@ def attach_capture(
                 sink.rows.append(
                     {
                         "phase": "prefill" if position < len(prefill) else "decode",
+                        "layer": layer,
                         "slot": slot,
                         "request_id": request_ids[slot],
                         "k": None

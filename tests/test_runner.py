@@ -199,6 +199,66 @@ def test_atomic_json_ignores_predictable_temp_symlink_without_clobbering_target(
     assert predictable.is_symlink()
 
 
+def test_exclusive_mutation_lock_supports_fresh_roots_and_is_root_scoped(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+
+    with runner.exclusive_mutation_lock(first_root):
+        assert first_root.is_dir()
+        assert (first_root / ".mutation.lock").is_file()
+        with runner.exclusive_mutation_lock(second_root):
+            assert second_root.is_dir()
+
+
+def test_exclusive_mutation_lock_rejects_same_root_contention(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    with runner.exclusive_mutation_lock(root):
+        with pytest.raises(runner.MutationLockError, match="already locked"):
+            with runner.exclusive_mutation_lock(root):
+                raise AssertionError("contended lock must not enter its body")
+
+
+def test_exclusive_mutation_lock_releases_after_success_and_exception(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    with runner.exclusive_mutation_lock(root):
+        pass
+    with runner.exclusive_mutation_lock(root):
+        pass
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        with runner.exclusive_mutation_lock(root):
+            raise RuntimeError("body failed")
+    with runner.exclusive_mutation_lock(root):
+        pass
+
+
+def test_exclusive_mutation_lock_rejects_symlinked_root_and_lock(
+    tmp_path: Path,
+) -> None:
+    real_root = tmp_path / "real-root"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        with runner.exclusive_mutation_lock(linked_root):
+            raise AssertionError("symlinked root must not be entered")
+
+    lock = real_root / ".mutation.lock"
+    victim = tmp_path / "victim"
+    victim.write_text("safe", encoding="utf-8")
+    lock.symlink_to(victim)
+    with pytest.raises(ValueError, match="symlink"):
+        with runner.exclusive_mutation_lock(real_root):
+            raise AssertionError("symlinked lock must not be entered")
+    assert victim.read_text(encoding="utf-8") == "safe"
+
+
 def test_append_jsonl_repairs_valid_unterminated_and_torn_tail(tmp_path: Path) -> None:
     path = tmp_path / "results.jsonl"
     path.write_bytes(b'{"id":"complete"}')
@@ -360,10 +420,33 @@ def test_manifest_rejects_each_configuration_change(tmp_path: Path) -> None:
         ("\n (f) \n", "F"),
         ("The answer is boxed", None),
         ("\nA\nB\n", "B"),
+        (r"The result is \boxed{A}", "A"),
+        (r"The result is \boxed{b}", "B"),
+        (r"The result is \boxed{ C }", "C"),
+        ("The result is \\boxed{\nD\n}", "D"),
+        (r"The result is \boxed{E", None),
+        (r"The result is \boxed{}", None),
+        (r"The result is \boxed{AB}", None),
+        (r"The result is \boxed{K}", None),
+        (r"A boxed decoy: \boxed{A}\nThe answer is (J)", "J"),
+        ("The answer is (H)\nThe answer is I", "I"),
+        ("The answer is (C)\n\nA sentence with a letter B", "C"),
     ],
 )
 def test_parse_answer_letter(text: str, expected: str | None) -> None:
     assert runner.parse_answer_letter(text) == expected
+
+
+@pytest.mark.parametrize("letter", list("ABCDEFGHIJ"))
+def test_parse_answer_letter_accepts_observed_boxed_answer_letters(letter: str) -> None:
+    assert runner.parse_answer_letter(rf"\boxed{{{letter}}}") == letter
+
+
+def test_parse_answer_letter_does_not_treat_arbitrary_prose_letters_as_answers() -> (
+    None
+):
+    assert runner.parse_answer_letter("The answer is obvious.") is None
+    assert runner.parse_answer_letter("A paragraph ending with option C") is None
 
 
 def test_mmlu_prompt_is_deterministic() -> None:
@@ -605,6 +688,31 @@ def test_steered_generate_baseline_has_no_steering(
     assert results == [runner.GenerateResult(text="ok", request_id="request-1")]
 
 
+def test_steered_generate_propagates_top_p_to_sampling_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sampling_kwargs: list[dict[str, object]] = []
+    sentinel = object()
+
+    def sampling_params(**kwargs: object) -> object:
+        sampling_kwargs.append(kwargs)
+        return sentinel
+
+    received: list[object] = []
+
+    def generate(_prompts: list[str], params: object) -> list[object]:
+        received.append(params)
+        return [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(text="ok")])]
+
+    monkeypatch.setattr(runner, "_sampling_params", sampling_params)
+    getattr(runner, "steered_generate")(
+        SimpleNamespace(generate=generate), ["p"], 2, None, **{"top_p": 0.9}
+    )
+
+    assert sampling_kwargs == [{"max_tokens": 2, "temperature": 0.0, "top_p": 0.9}]
+    assert received == [sentinel]
+
+
 def test_steered_generate_capture_layer_and_missing_layer_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -631,6 +739,89 @@ def test_steered_generate_capture_layer_and_missing_layer_guard(
         ValueError, match="capture requires capture_layer or a steering spec"
     ):
         runner.steered_generate(llm, ["p"], 2, None, sink=runner.CaptureSink())
+
+
+def test_steered_generate_captures_all_baseline_layers_with_stable_scalar_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attached: list[tuple[str, int]] = []
+    detached: list[tuple[str, int]] = []
+    generated = 0
+    sinks = runner.CaptureSink()
+    directions = {layer: [torch.tensor([float(layer), 1.0])] for layer in range(11)}
+
+    def attach_capture(llm, layer, sink, **kwargs):
+        attached.append(("capture", layer))
+        assert kwargs["scalar_directions"] == directions[layer]
+        return lambda: detached.append(("capture", layer))
+
+    def attach_steering(llm, layer, **kwargs):
+        attached.append(("steering", layer))
+        return lambda: detached.append(("steering", layer))
+
+    def generate(prompts, params):
+        nonlocal generated
+        generated += 1
+        return [SimpleNamespace(request_id="r", outputs=[SimpleNamespace(text="ok")])]
+
+    monkeypatch.setattr(runner, "attach_capture", attach_capture)
+    monkeypatch.setattr(runner, "attach_steering", attach_steering)
+    monkeypatch.setattr(runner, "make_decode_index_resolver", lambda llm: "resolver")
+    monkeypatch.setattr(runner, "_sampling_params", lambda **kwargs: kwargs)
+
+    spec = runner.SteeringSpec(
+        19, torch.ones(2), 0.5, 2.0, SteeringSchedule.prefix(3), -1.0
+    )
+    runner.steered_generate(
+        SimpleNamespace(generate=generate),
+        ["p"],
+        4,
+        spec,
+        sink=sinks,
+        capture_layers=list(range(11)),
+        scalar_directions=directions,
+    )
+
+    assert generated == 1
+    assert [layer for kind, layer in attached if kind == "capture"] == list(range(11))
+    assert detached == list(reversed(attached))
+
+
+def test_steered_generate_multi_layer_capture_detaches_every_handle_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detached: list[tuple[str, int]] = []
+
+    def attach_capture(llm, layer, sink, **kwargs):
+        return lambda: detached.append(("capture", layer))
+
+    def attach_steering(llm, layer, **kwargs):
+        return lambda: detached.append(("steering", layer))
+
+    monkeypatch.setattr(runner, "attach_capture", attach_capture)
+    monkeypatch.setattr(runner, "attach_steering", attach_steering)
+    monkeypatch.setattr(runner, "make_decode_index_resolver", lambda llm: "resolver")
+    monkeypatch.setattr(runner, "_sampling_params", lambda **kwargs: kwargs)
+
+    spec = runner.SteeringSpec(
+        19, torch.ones(2), 0.5, 2.0, SteeringSchedule.prefix(3), -1.0
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        runner.steered_generate(
+            SimpleNamespace(
+                generate=lambda prompts, params: (_ for _ in ()).throw(
+                    RuntimeError("boom")
+                )
+            ),
+            ["p"],
+            4,
+            spec,
+            sink=runner.CaptureSink(),
+            capture_layers=[19, 20],
+            scalar_directions={19: [torch.ones(2)], 20: [torch.ones(2)]},
+        )
+
+    assert detached == [("capture", 20), ("capture", 19), ("steering", 19)]
 
 
 def test_manifest_round_trip_and_stale_hint(tmp_path: Path) -> None:
