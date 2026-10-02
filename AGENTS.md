@@ -1,7 +1,7 @@
 # AGENTS
 
 1. Use TDD: write tests before writing source code.
-2. Start work on a new branch. When the work is finished, commit all changes and open a PR. Keep the PR concise and clear; do not add fluff.
+2. Before starting work, check for open PRs. If a PR is already open for the current work, continue on its branch, commit the changes, and update that PR; do not create another PR. If multiple PRs are open, use the one that matches the current work. Only when no existing open PR applies should you start a new branch and open a PR. Keep the PR concise and clear; do not add fluff.
 3. Use only the folders already listed. Put each file in its corresponding folder. Do not create new folders unless I am unavailable and you cannot ask me.
 4. Use uv to manage virtual environments.
 5. If you are unsure, ask me first. If you cannot ask me, search the website or documentation. Do not guess.
@@ -10,4 +10,3 @@
 8. Experiments must log incrementally: persist partial results (JSON) after each completed method or condition, and tee every print to both stdout and a log file under `logs/`. Never buffer all output until the end. `logs/` stores log files only; do not put other files there.
 9. All experiment code must support checkpoint/resume: after each completed unit of work (per example, per config, per condition), persist progress to disk (JSON checkpoint); on restart, detect existing checkpoints and skip completed units. Jobs may be preempted at any time; completed work must never be recomputed or lost.
 10. Private instructions: if `AGENTS.local.md` exists in the repo root, read it at the start of every session and follow it. It is gitignored; never commit, copy, or expose its contents (or anything referenced by it) in tracked files, commits, or PRs.
-11. Wrap long-running experiment entrypoints with `notify_on_exit` from `src/prefix/notify.py` so the owner is emailed on completion or failure (credentials live in gitignored `.env`).

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import smtplib
+import threading
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -26,7 +29,7 @@ def fake_smtp(monkeypatch: pytest.MonkeyPatch) -> type:
         def __init__(self, host: str, port: int, timeout: float | None = None) -> None:
             self.host = host
             self.port = port
-            self.ops: list[tuple] = []
+            self.ops: list[tuple[object, ...]] = []
             self.sent: list[object] = []
             instances.append(self)
 
@@ -49,7 +52,7 @@ def fake_smtp(monkeypatch: pytest.MonkeyPatch) -> type:
             self.ops.append(("quit",))
 
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
-    FakeSMTP.instances = instances  # type: ignore[attr-defined]
+    setattr(FakeSMTP, "instances", instances)
     return FakeSMTP
 
 
@@ -80,6 +83,35 @@ def test_load_dotenv_parses_keys_quotes_and_comments(tmp_path: Path) -> None:
     assert values["PREFIX_NOTIFY_TO"] == "a@x.com, b@y.com"
     assert "IGNORED_NO_EQUALS_LINE" not in values
     assert len(values) == 3
+
+
+def test_load_dotenv_ignores_process_environment_injection_keys(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(
+        "PREFIX_GMAIL_USER=sender@gmail.com\n"
+        "LD_PRELOAD=/tmp/evil.so\n"
+        "PYTHONPATH=/tmp/evil\n"
+        "NOTIFICATION_STATE=/tmp/redirected.json\n",
+        encoding="utf-8",
+    )
+
+    values = notify._load_dotenv(env)
+
+    assert values == {"PREFIX_GMAIL_USER": "sender@gmail.com"}
+
+
+@pytest.mark.parametrize("kind", ["mode", "symlink"])
+def test_load_dotenv_rejects_unsafe_optional_file(tmp_path: Path, kind: str) -> None:
+    target = tmp_path / "real.env"
+    target.write_text("PREFIX_GMAIL_USER=sender@gmail.com\n", encoding="utf-8")
+    if kind == "mode":
+        target.chmod(0o666)
+        env = target
+    else:
+        env = tmp_path / ".env"
+        env.symlink_to(target)
+
+    assert notify._load_dotenv(env) == {}
 
 
 def test_load_dotenv_missing_file_returns_empty(tmp_path: Path) -> None:
@@ -241,3 +273,468 @@ def test_notify_on_exit_hostname_in_body(
     (inst,) = fake_smtp.instances  # type: ignore[attr-defined]
     (msg,) = inst.sent
     assert socket.gethostname() in msg.get_content()
+
+
+def test_notify_on_exit_disabled_sends_no_email_and_reraises(
+    fake_smtp: type,
+) -> None:
+    with notify.notify_on_exit("child", enabled=False):
+        pass
+    with pytest.raises(RuntimeError, match="boom"):
+        with notify.notify_on_exit("child", enabled=False):
+            raise RuntimeError("boom")
+    assert fake_smtp.instances == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("event", ["completed", "decision_required"])
+def test_send_batch_notification_sends_one_neutral_event_email(
+    fake_smtp: type, monkeypatch: pytest.MonkeyPatch, event: str
+) -> None:
+    _set_creds(monkeypatch)
+    notify.send_batch_notification("no-steering batch", event)
+    (inst,) = fake_smtp.instances  # type: ignore[attr-defined]
+    (msg,) = inst.sent
+    assert len(inst.sent) == 1
+    assert event in msg["Subject"]
+    assert "no-steering batch" in msg.get_content()
+
+
+def test_send_batch_notification_invalid_event_sends_no_email(
+    fake_smtp: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_creds(monkeypatch)
+    with pytest.raises(ValueError, match="completed"):
+        notify.send_batch_notification("batch", "failed")
+    assert fake_smtp.instances == []  # type: ignore[attr-defined]
+
+
+def test_send_batch_notification_failure_is_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        notify,
+        "send_email",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("smtp down")),
+    )
+    notify.send_batch_notification("batch", "completed")
+
+
+def _terminal_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    state_path: Path,
+    *,
+    status: Literal["completed", "failed"],
+    calls: list[tuple[str, str]],
+) -> None:
+    def fake_sender(subject: str, body: str, **_: object) -> None:
+        calls.append((subject, body))
+
+    monkeypatch.setattr(notify, "send_email", fake_sender)
+    notify.finalize_terminal_notification(
+        "benchmark-investigation",
+        status=status,
+        state_path=state_path,
+        details="whole workflow finalized",
+    )
+
+
+def test_terminal_summary_success_is_only_email_after_all_phases(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "checkpoints" / "notification.json"
+
+    for phase in ("prepare", "generate", "analyze"):
+        with notify.notify_on_exit(phase, enabled=False):
+            pass
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+
+    assert len(calls) == 1
+    assert "benchmark-investigation" in calls[0][0]
+    assert "completed" in calls[0][1]
+    assert json.loads(state.read_text(encoding="utf-8"))["status"] == "sent"
+
+
+def test_terminal_summary_failure_is_one_terminal_email(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+
+    _terminal_summary(monkeypatch, state, status="failed", calls=calls)
+
+    assert len(calls) == 1
+    assert "FAILED" in calls[0][0]
+    assert "failed" in calls[0][1]
+
+
+def test_failed_managed_job_then_completed_scoring_uses_one_shared_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "generation" / "notification.json"
+    attempts = 0
+
+    def sender(subject: str, body: str, **_: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        calls.append((subject, body))
+        if attempts == 1:
+            raise OSError("temporary SMTP failure")
+
+    monkeypatch.setattr(notify, "send_email", sender)
+
+    assert (
+        notify.finalize_terminal_notification(
+            "no-steering", status="failed", state_path=state
+        )
+        == "failed"
+    )
+    assert (
+        notify.finalize_terminal_notification(
+            "no-steering", status="completed", state_path=state
+        )
+        == "sent"
+    )
+    assert len(calls) == 2
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "completed"
+    assert saved["delivery_status"] == "sent"
+
+
+def test_sent_failed_workflow_then_completed_resume_updates_workflow_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "generation" / "notification.json"
+
+    def sender(subject: str, body: str, **_: object) -> None:
+        calls.append((subject, body))
+
+    monkeypatch.setattr(notify, "send_email", sender)
+
+    assert (
+        notify.finalize_terminal_notification(
+            "no-steering", status="failed", state_path=state
+        )
+        == "sent"
+    )
+    assert (
+        notify.finalize_terminal_notification(
+            "no-steering", status="completed", state_path=state
+        )
+        == "sent"
+    )
+
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "completed"
+    assert saved["delivery_status"] == "sent"
+    assert len(calls) == 1
+
+
+def test_repeated_terminal_finalization_does_not_duplicate_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+
+    assert len(calls) == 1
+
+
+def test_resume_after_sent_state_does_not_send_again(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps(
+            {
+                "task": "benchmark-investigation",
+                "status": "sent",
+                "notification_attempted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+
+    assert calls == []
+
+
+def test_ambiguous_claimed_state_suppresses_duplicate_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(
+        json.dumps(
+            {
+                "task": "benchmark-investigation",
+                "status": "claimed",
+                "notification_attempted": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+
+    assert calls == []
+
+
+def test_initial_claim_fsync_failure_leaves_no_torn_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    real_fsync = notify.os.fsync
+    failed = False
+
+    def fail_once(fd: int) -> None:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("simulated crash during claim fsync")
+        real_fsync(fd)
+
+    monkeypatch.setattr(notify.os, "fsync", fail_once)
+    with pytest.raises(OSError, match="claim fsync"):
+        notify._claim_notification_state(state, {"status": "claimed"})
+
+    assert not state.exists()
+    assert notify._claim_notification_state(state, {"status": "claimed"}) is True
+    assert json.loads(state.read_text(encoding="utf-8"))["status"] == "claimed"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    ['{"status":', "[]", '{"event": "completed"}'],
+)
+def test_malformed_or_ambiguous_claim_state_never_resends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: str
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+    state.write_text(contents, encoding="utf-8")
+
+    _terminal_summary(monkeypatch, state, status="completed", calls=calls)
+
+    assert calls == []
+    assert state.read_text(encoding="utf-8") == contents
+
+
+def test_concurrent_failed_retries_only_one_sends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+    state = tmp_path / "notification.json"
+    state.write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+    first_send_started = threading.Event()
+    release_first_send = threading.Event()
+    calls_lock = threading.Lock()
+
+    def sender(subject: str, body: str, **_: object) -> None:
+        with calls_lock:
+            calls.append((subject, body))
+        first_send_started.set()
+        assert release_first_send.wait(timeout=5)
+
+    monkeypatch.setattr(notify, "send_email", sender)
+    results: list[str] = []
+
+    def retry() -> None:
+        results.append(
+            notify.finalize_terminal_notification(
+                "benchmark-investigation",
+                status="completed",
+                state_path=state,
+            )
+        )
+
+    first = threading.Thread(target=retry)
+    second = threading.Thread(target=retry)
+    first.start()
+    assert first_send_started.wait(timeout=5)
+    second.start()
+    second.join(timeout=5)
+    release_first_send.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert sorted(results) == ["claimed", "sent"]
+    assert len(calls) == 1
+
+
+def test_terminal_state_separates_workflow_and_delivery_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    calls: list[tuple[str, str]] = []
+
+    def sender(subject: str, body: str, **_: object) -> None:
+        calls.append((subject, body))
+
+    monkeypatch.setattr(notify, "send_email", sender)
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "sent"
+    )
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "completed"
+    assert saved["delivery_status"] == "sent"
+    assert saved["status"] == "sent"
+    assert len(calls) == 1
+
+
+def test_known_send_return_false_is_retryable_without_changing_workflow_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    attempts = 0
+
+    def sender(*_: object, **__: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return attempts > 1
+
+    monkeypatch.setattr(notify, "send_email", sender)
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "failed"
+    )
+    first = json.loads(state.read_text(encoding="utf-8"))
+    assert first["workflow_status"] == "completed"
+    assert first["delivery_status"] == "failed"
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "sent"
+    )
+    second = json.loads(state.read_text(encoding="utf-8"))
+    assert second["workflow_status"] == "completed"
+    assert second["delivery_status"] == "sent"
+    assert attempts == 2
+
+
+def test_ambiguous_post_smtp_outcome_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    attempts = 0
+
+    def sender(*_: object, **__: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise notify.AmbiguousDeliveryError("SMTP acceptance is unknown")
+
+    monkeypatch.setattr(notify, "send_email", sender)
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "claimed"
+    )
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["workflow_status"] == "completed"
+    assert saved["delivery_status"] == "claimed"
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "claimed"
+    )
+    assert attempts == 1
+
+
+def test_interrupted_claim_before_atomic_link_can_be_recovered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    real_link = notify.os.link
+    interrupted = True
+
+    def link_once(
+        source: str | bytes,
+        destination: str | bytes,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        nonlocal interrupted
+        if interrupted:
+            interrupted = False
+            raise OSError("interrupted claim")
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(notify.os, "link", link_once)
+    with pytest.raises(OSError, match="interrupted claim"):
+        notify._claim_notification_state(state, {"delivery_status": "claimed"})
+    assert not state.exists()
+    assert (
+        notify._claim_notification_state(state, {"delivery_status": "claimed"}) is True
+    )
+
+
+def test_record_terminal_workflow_does_not_replace_malformed_state(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "notification.json"
+    contents = '{"workflow_status":'
+    state.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        notify.record_terminal_workflow(
+            "workflow", status="completed", state_path=state
+        )
+
+    assert state.read_text(encoding="utf-8") == contents
+
+
+def test_unknown_delivery_status_is_ambiguous_and_never_resends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = tmp_path / "notification.json"
+    original = {
+        "task": "workflow",
+        "workflow_status": "completed",
+        "delivery_status": "bogus",
+        "status": "bogus",
+    }
+    state.write_text(json.dumps(original), encoding="utf-8")
+    calls: list[object] = []
+    monkeypatch.setattr(
+        notify,
+        "send_email",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert (
+        notify.finalize_terminal_notification(
+            "workflow", status="completed", state_path=state
+        )
+        == "claimed"
+    )
+    assert calls == []
+    assert json.loads(state.read_text(encoding="utf-8")) == original
